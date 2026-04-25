@@ -4,6 +4,74 @@
 
 ---
 
+## Indice
+
+- [Come funziona](#come-funziona)
+- [Architettura](#architettura)
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Comandi](#comandi)
+- [Flusso: `agency chat`](#flusso-agency-chat)
+- [Flusso: `agency task`](#flusso-agency-task)
+- [Flusso: Auto-fix su errori di build](#flusso-auto-fix-su-errori-di-build)
+- [Flusso: `agency review`](#flusso-agency-review)
+- [Flusso: Caricamento regole](#flusso-caricamento-regole)
+- [Crea un nuovo progetto Spring Boot](#crea-un-nuovo-progetto-spring-boot)
+- [Regole del progetto](#regole-del-progetto)
+- [Code Review](#code-review)
+- [Configurazione provider](#configurazione-provider)
+- [Struttura del progetto](#struttura-del-progetto)
+- [Personalizzazione CLI](#personalizzazione-cli)
+
+---
+
+## Come funziona
+
+Agency è una CLI che funge da **agente AI locale** per il tuo progetto. Non è un semplice wrapper attorno a un LLM: costruisce un contesto strutturato (regole, task, sorgenti) e orchestra l'LLM per produrre codice funzionante, verificato e conforme alle linee guida del tuo team.
+
+Il flusso di base è:
+
+```
+Utente → CLI → Rules Loader → LLM (streaming) → File Writer → (mvn test) → Output
+```
+
+Ogni comando carica le **regole** del progetto da `.continue/rules/`, le inietta nel system prompt e poi interagisce con l'LLM scelto via API OpenAI-compatibile.
+
+---
+
+## Architettura
+
+```
+agency-cli/
+├── src/
+│   ├── cli.js              ← Entry point: registra tutti i comandi (Commander.js)
+│   ├── brand.js            ← Nome CLI, versione, colore primario
+│   ├── agency-config.js    ← Lettura/scrittura ~/.agency/config.yaml
+│   ├── config.js           ← Helper configurazione
+│   ├── roles.js            ← Definizione ruoli (developer, pm, ticket-manager)
+│   ├── utils.js            ← Spinner, clearLine, helper terminale
+│   ├── commands/
+│   │   ├── chat.js         ← agency chat: intent detection + task generation
+│   │   ├── task.js         ← agency task: planning + step execution + auto-fix
+│   │   ├── review.js       ← agency review: git diff → code review LLM
+│   │   ├── init.js         ← agency init: analisi progetto + seed regole
+│   │   ├── models.js       ← agency models: configurazione provider interattiva
+│   │   ├── run.js          ← agency run: prompt one-shot
+│   │   └── rules.js        ← agency rules new/list
+│   └── rules/
+│       ├── 01-java-guidelines.md     ← sealed
+│       ├── 02-angular-guidelines.md  ← sealed
+│       ├── 03-security.md            ← sealed
+│       ├── 04-task-runner.md         ← modificabile
+│       └── 05-create-project.md      ← sealed
+├── install.sh
+└── package.json
+```
+
+Le **regole sealed** vengono incorporate nel binario al momento dell'install e scritte in `.continue/rules/` ad ogni `agency init`. Non possono essere modificate manualmente (vengono sovrascritte).
+
+---
+
 ## Install
 
 ```bash
@@ -22,7 +90,7 @@ Supporta: **macOS**, **Linux**, **Windows (Git Bash / WSL)**.
 # 1. Configura il provider AI
 agency models
 
-# 2. Inizializza il progetto
+# 2. Entra nel tuo progetto e inizializzalo
 cd mio-progetto
 agency init
 
@@ -39,7 +107,7 @@ agency chat
 | `agency chat` | Chat interattiva con intent detection automatica |
 | `agency models` | Configura provider AI e seleziona modello |
 | `agency init` | Inizializza il progetto (genera rules + project overview) |
-| `agency task <file>` | Implementa un task da file `.md` con progress bar |
+| `agency task <file>` | Implementa un task da file `.md` con esecuzione step-by-step |
 | `agency review` | Code review della diff git corrente |
 | `agency rules new` | Crea una nuova regola guidata per il progetto |
 | `agency rules list` | Elenca le regole attive nel progetto |
@@ -50,45 +118,42 @@ agency chat
 
 ---
 
-## Chat intelligente
+## Flusso: `agency chat`
 
-```bash
-agency chat
+La chat non è una semplice conversazione: ogni messaggio viene classificato da un **intent classifier** (una chiamata LLM rapida) che decide se rispondere direttamente oppure generare un task da eseguire.
+
+```mermaid
+flowchart TD
+    A([Utente scrive un messaggio]) --> B[Carica regole dal progetto\n.continue/rules/]
+    B --> C[Intent Classifier\nchiamata LLM]
+    C --> D{Intent rilevato}
+
+    D -->|CHAT| E[Risposta diretta\nstreaming a schermo]
+    D -->|IMPLEMENT| F[Genera task file\ntasks/*.md]
+    D -->|CREATE_PROJECT| G[Genera task file\ntasks/create-project-*.md]
+
+    F --> H[Mostra anteprima task]
+    G --> H
+
+    H --> I{Utente conferma?}
+    I -->|n| J([Fine — task salvato in tasks/])
+    I -->|s| K[Esegui agency task internamente]
+
+    K --> L[Flusso agency task\nvedi sezione successiva]
+    E --> M([Risposta mostrata — attende prossimo input])
 ```
 
-La chat **rileva automaticamente l'intent** del messaggio:
+### Intent detection
 
-- Se scrivi una domanda → risponde in chat
-- Se scrivi una richiesta di implementazione → genera un `task.md`, mostra un'anteprima e chiede se eseguire
+L'intent viene classificato tra tre categorie:
 
-```
-  > come funziona OnPush change detection?
-  ⋯ Analizzo...
+| Intent | Quando | Segnali tipici |
+|---|---|---|
+| `CHAT` | Domanda, debug, spiegazione, review | "come funziona", "perché", "spiega", "cos'è" |
+| `IMPLEMENT` | Modifica su progetto esistente | "crea", "aggiungi", "implementa", "scrivi", "refactora" |
+| `CREATE_PROJECT` | Nuovo progetto da zero | "nuovo progetto spring", "crea un app", "bootstrap", "genera uno starter" |
 
-  OnPush significa che Angular ri-renderizza il componente solo quando...
-
-  > crea un componente Angular per visualizzare una lista utenti
-  ⋯ Analizzo...
-
-  📝 Richiesta di implementazione — genero il task...
-
-  📄 tasks/crea-componente-angular-lista-utenti.md
-
-  ## Obiettivo
-  Creare un componente Angular standalone...
-  ...
-
-  Eseguo il task adesso? [s/n] s
-
-  📌 Task: crea-componente-angular-lista-utenti.md
-
-  Piano:
-    1. Crea UserListComponent standalone con OnPush
-    2. Crea interfaccia User in models/
-    ...
-
-  [████████████░░░░░░░░░░░░░░░░]  57% (4/7) Step 5: Scrivi i test Jest
-```
+I task `CREATE_PROJECT` producono sempre file con prefisso `create-project-`, che attiva automaticamente la regola sealed `05-create-project`.
 
 ### Opzioni
 
@@ -100,68 +165,182 @@ agency chat --role ticket-manager
 
 ---
 
-## Task da file
+## Flusso: `agency task`
 
-Crea un file `.md` nella cartella `tasks/` con le specifiche:
+`agency task <file>` implementa un task in tre fasi sequenziali: planning, esecuzione step-by-step, e (se è un `create-project`) lancio dei test con auto-fix.
 
-```markdown
-# tasks/user-service.md
+```mermaid
+flowchart TD
+    A([agency task tasks/mio-task.md]) --> B[Legge il file task]
+    B --> C[Carica regole progetto\nloadRules + javaRulesBlock]
+    C --> D{È un create-project?}
 
-## Obiettivo
-Implementa un UserService Spring Boot completo.
+    D -->|sì| E[Scaffold Spring Boot\nstart.spring.io o fallback manuale]
+    D -->|no| F
 
-## Requisiti funzionali
-- Entity `User`: id, username, email, createdAt
-- Repository JPA con `findByEmail`
-- Service con `createUser`, `getUserById`, `deleteUser`
-- Eccezione `UserNotFoundException`
+    E --> F[FASE 1 — Planning\nLLM genera piano numerato]
+    F --> G[Stampa piano a schermo]
+    G --> H[FASE 2 — Esecuzione step]
 
-## Vincoli tecnici
-- Segui 01-java-guidelines.md
-- Iniezione via costruttore obbligatoria
+    H --> I[Per ogni step:\nchiede codice all'LLM in streaming]
+    I --> J[Estrae blocchi di codice\nextractFilesFromOutput]
+    J --> K[Scrive i file su disco\nwriteExtractedFiles]
+    K --> L{Altri step?}
+    L -->|sì| I
+    L -->|no| M{È un create-project?}
 
-## Test richiesti
-- createUser_validInput_returnsDto()
-- deleteUser_nonExisting_throwsException()
+    M -->|no| N[FASE 4 — Summary + archivia task]
+    M -->|sì| O[FASE 3 — mvn test\nrunMvnWithRetry]
+    O --> P{BUILD SUCCESS?}
+    P -->|sì| N
+    P -->|no| Q[Flusso Auto-fix\nvedi sezione successiva]
+    Q --> N
+
+    N --> R([Fine — task archiviato in tasks/.processed/])
 ```
 
-Esegui:
+### Estrazione dei file dal codice LLM
 
-```bash
-agency task tasks/user-service.md
+L'agente riconosce i file da scrivere analizzando i blocchi di codice nella risposta LLM. Ogni blocco deve avere il percorso del file come **prima riga commentata**:
+
+```java
+// ecommerce-service/src/main/java/com/example/ProductController.java
+package com.example;
+...
 ```
 
-L'agente:
-1. Legge il task e le regole del progetto
-2. Genera un piano numerato
-3. Esegue ogni step con progress bar
-4. Scrive i file di codice direttamente nel progetto
-5. Salva il log in `.continue/agent.log`
-6. Archivia il task in `tasks/.processed/`
+Senza questa riga, il file non viene scritto su disco.
 
 ---
 
-## Crea un nuovo progetto Spring Boot da zero
+## Flusso: Auto-fix su errori di build
 
-La regola `05-create-project` è **sealed** (cablata nel binario) e si attiva
-automaticamente quando il task file segue il pattern `tasks/create-project*.md`.
+Quando `mvn test` fallisce, l'agente non si ferma: entra in un **loop di auto-fix** che tenta di correggere gli errori usando l'LLM, fino a `MAX_FIX_ATTEMPTS = 3` tentativi.
+
+```mermaid
+flowchart TD
+    A([mvn test]) --> B{exit code == 0?}
+    B -->|sì| C([✔ BUILD SUCCESS])
+
+    B -->|no| D{attempt >= MAX_FIX_ATTEMPTS?}
+    D -->|sì| E([✖ Fallito — controlla manualmente])
+
+    D -->|no| F[Leggi sorgenti del progetto\nreadProjectSources\nmax 40 file / 80KB]
+    F --> G[Estrai righe ERROR dall'output Maven\nfiltro su ERROR, Exception, cannot find symbol...]
+    G --> H[Prompt all'LLM:\nerrori + sorgenti → fix in streaming]
+    H --> I[Estrai file corretti\nextractFilesFromOutput]
+    I --> J{File estratti?}
+    J -->|no| E
+    J -->|sì| K[Sovrascrivi i file su disco\nwriteExtractedFiles]
+    K --> L[attempt++]
+    L --> A
+```
+
+### Cosa vedi a schermo
+
+```
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ ⚙  mvn test — Fix automatico 1/3                                         │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  [ERROR] ProductService.java:[42] cannot find symbol: method findAll()
+  [ERROR] BUILD FAILURE
+
+  ✖ BUILD FAILED (tentativo 1/4)
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ 🔧  Auto-fix 1/3 — Analisi errori in corso...                            │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  Streaming fix in corso...
+
+  // ecommerce-service/src/main/java/com/example/ProductRepository.java
+  ...
+
+  └ ✔ ecommerce-service/src/main/java/com/example/ProductRepository.java [fixato]
+
+  ✔ mvn test — BUILD SUCCESS (dopo 1 fix)
+```
+
+---
+
+## Flusso: `agency review`
+
+```mermaid
+flowchart TD
+    A([agency review]) --> B{--branch specificato?}
+    B -->|sì| C[git diff HEAD..branch]
+    B -->|no| D[git diff staged + unstaged]
+    C --> E[Carica regole progetto]
+    D --> E
+    E --> F[LLM analizza la diff\nstreaming]
+    F --> G[Genera tabella:\nTipo · File:riga · Problema · Fix suggerito]
+    G --> H{--output specificato?}
+    H -->|sì| I[Salva report .md]
+    H -->|no| J([Stampa a schermo])
+    I --> J
+```
+
+```bash
+agency review                    # diff non committata
+agency review --branch main      # diff rispetto a main
+agency review -o reports/rev.md  # salva il report
+```
+
+---
+
+## Flusso: Caricamento regole
+
+Ogni comando che interagisce con l'LLM esegue prima `loadRules()` per costruire il contesto di sistema. Le regole vengono selezionate in base al task file attivo.
+
+```mermaid
+flowchart TD
+    A([loadRules chiamato]) --> B[Cerca .continue/rules/*.md]
+    B --> C{Directory esiste?}
+    C -->|no| D([Ritorna EMPTY_RULES\nbest practice standard])
+
+    C -->|sì| E[Legge ogni file .md\nordine alfabetico]
+    E --> F[Parsa frontmatter YAML\nalwaysApply, globs, name]
+
+    F --> G{alwaysApply: true?}
+    G -->|sì| H[Aggiunge a always rules]
+    G -->|no| I{Ha globs?}
+
+    I -->|no| J[Ignora la regola]
+    I -->|sì| K{Il task file\ncorrisponde al glob?}
+    K -->|no| J
+    K -->|sì| L[Aggiunge a byGlob rules]
+
+    H --> M[Costruisce summary\nper il system prompt]
+    L --> M
+    M --> N([Ritorna always + byGlob])
+```
+
+### Priorità delle regole
+
+Le regole `alwaysApply: true` sono sempre iniettate nel system prompt, indipendentemente dal task. Le regole con `globs` si attivano solo se il percorso del task file corrisponde al pattern. Le regole Java/Spring vengono estratte separatamente da `javaRulesBlock()` e posizionate in cima al system prompt nei task `create-project`.
+
+---
+
+## Crea un nuovo progetto Spring Boot
+
+La regola `05-create-project` è **sealed** e si attiva automaticamente quando il task file segue il pattern `tasks/create-project*.md`.
 
 ### Come usarla
 
-**1. Entra nella cartella dove vuoi creare il progetto** (può essere vuota o una
-cartella workspace già esistente):
+**1. Entra nella cartella workspace:**
 
 ```bash
 cd ~/progetti
 ```
 
-**2. Inizializza agency nella cartella corrente:**
+**2. Inizializza agency:**
 
 ```bash
 agency init
 ```
 
-**3. Crea il file task** in `tasks/create-project-<nome>.md`:
+**3. Crea il file task:**
 
 ```markdown
 # tasks/create-project-ecommerce.md
@@ -191,95 +370,47 @@ agency init
 agency task tasks/create-project-ecommerce.md
 ```
 
-L'agente eseguirà automaticamente questi step:
+L'agente esegue in sequenza:
 
 ```
   📌 Task: create-project-ecommerce.md  [regola: 05-create-project • sealed]
 
+  ✔ Scaffold: ecommerce-service/  [start.spring.io]
+
   Piano:
-    1. Leggi il task e rileva le configurazioni
-    2. Crea struttura Maven in ecommerce-service/
-    3. Genera pom.xml con le dipendenze richieste
-    4. Genera entry point EcommerceServiceApplication.java
-    5. Genera model Product + DTO + validazioni
-    6. Genera ProductRepository + ProductService + ProductServiceImpl
-    7. Genera ProductController con endpoint REST
-    8. Genera GlobalExceptionHandler (@ControllerAdvice)
-    9. Genera test unitari ProductServiceImplTest
-   10. Genera test slice ProductControllerTest
-   11. Genera EcommerceApplicationTests
-   12. Esegui: mvn test -q
+    1. Genera pom.xml con dipendenze
+    2. Genera entry point EcommerceServiceApplication.java
+    3. Genera model Product + DTO + validazioni
+    4. Genera ProductRepository + ProductService + ProductServiceImpl
+    5. Genera ProductController con endpoint REST
+    6. Genera GlobalExceptionHandler (@ControllerAdvice)
+    7. Genera test unitari e slice test
 
-  [████████████████████████████]  100% (12/12)
+  ▶ Step 1/7: Genera pom.xml con dipendenze
+  ...
 
-  ✔ mvn test — BUILD SUCCESS  (7 test passed, 0 failed)
+  ⚙  Fase 3 — mvn test
 
-  | File creato                                      | Tipo         |
-  |--------------------------------------------------|---------------|
-  | ecommerce-service/pom.xml                        | Maven config  |
-  | .../EcommerceServiceApplication.java             | Entry point   |
-  | .../model/Product.java                           | Entity/Model  |
-  | .../dto/ProductDto.java                          | DTO           |
-  | .../repository/ProductRepository.java            | Repository    |
-  | .../service/ProductService.java                  | Interface     |
-  | .../service/ProductServiceImpl.java              | Service       |
-  | .../controller/ProductController.java            | REST endpoint |
-  | .../exception/ProductNotFoundException.java      | Exception     |
-  | .../exception/GlobalExceptionHandler.java        | Advice        |
-  | .../test/.../ProductServiceImplTest.java         | Unit test     |
-  | .../test/.../ProductControllerTest.java          | Slice test    |
-  | .../test/.../EcommerceApplicationTests.java      | Context test  |
+  ✔ mvn test — BUILD SUCCESS
 
-  🚀 Avvia il progetto:
+  🚀 Per avviare il progetto:
      cd ecommerce-service && mvn spring-boot:run
 ```
 
-### Nomi file task validi per questa regola
+### Pattern file task validi
 
 | Pattern file | Attiva la regola? |
 |---|---|
 | `tasks/create-project-ecommerce.md` | ✔ sì |
 | `tasks/create-project-auth.md` | ✔ sì |
 | `tasks/new-project-orders.md` | ✔ sì |
-| `tasks/init-project-gateway.md` | ✔ sì |
 | `tasks/user-service.md` | ✘ no (usa 04-task-runner) |
-
-> La regola **05-create-project** è sealed: viene scritta in `.continue/rules/`
-> ad ogni `agency init` e non può essere sovrascritta o eliminata manualmente.
-
----
-
-## Code Review
-
-```bash
-# Review della diff non committata
-agency review
-
-# Review rispetto a un branch
-agency review --branch main
-
-# Salva il report
-agency review -o reports/review.md
-```
-
-Output:
-
-```
-  🔍 Code Review in corso...
-
-  | Tipo     | File:riga           | Problema                   | Fix suggerito         |
-  |----------|---------------------|----------------------------|-----------------------|
-  | SECURITY | UserService.java:42 | Password loggata in chiaro | Rimuovi il log        |
-  | STYLE    | OrderCtrl.java:18   | Metodo supera 30 righe     | Estrai metodo privato |
-
-  ⚠ Verdetto: CHANGES_REQUESTED
-```
 
 ---
 
 ## Regole del progetto
 
-Le regole si trovano in `.continue/rules/` e vengono caricate automaticamente dall'agente. Ogni regola è un file Markdown con frontmatter YAML.
+Le regole si trovano in `.continue/rules/` e vengono caricate automaticamente. Ogni regola è un file Markdown con frontmatter YAML.
 
 ### Regole predefinite (generate da `agency init`)
 
@@ -292,7 +423,7 @@ Le regole si trovano in `.continue/rules/` e vengono caricate automaticamente da
 | `04-task-runner.md` | modificabile | Processo di esecuzione dei task |
 | `05-create-project.md` | sealed | Crea un progetto Spring Boot da zero + esegue JUnit |
 
-> Le regole **sealed** sono incorporate nel binario e non possono essere modificate. Riesegui `agency init` per rigenerarle.
+> Le regole **sealed** vengono riscritte ad ogni `agency init` e non possono essere modificate permanentemente.
 
 ### Creare una nuova regola
 
@@ -308,12 +439,11 @@ Wizard interattivo:
   Nome della regola: Angular Feature Rules
   Descrizione breve: Regole per nuovi componenti Angular in src/app/features
   Sempre attiva? [s/n]: n
-  Glob pattern (es: src/app/**/*.ts): src/app/features/**/*.ts, src/app/features/**/*.html
+  Glob pattern (es: src/app/**/*.ts): src/app/features/**/*.ts
 
-  Contenuto della regola (termina con una riga contenente solo "---"):
+  Contenuto della regola (termina con ---):
   - Usa sempre standalone: true
   - ChangeDetectionStrategy.OnPush obbligatorio
-  - Signals per lo stato locale, non BehaviorSubject
   ---
 
   ✓ Regola creata: .continue/rules/06-angular-feature-rules.md
@@ -357,27 +487,30 @@ agency rules list
 
 ---
 
-## Struttura del progetto
+## Code Review
 
-Dopo `agency init`:
+```bash
+# Review della diff non committata
+agency review
+
+# Review rispetto a un branch
+agency review --branch main
+
+# Salva il report
+agency review -o reports/review.md
+```
+
+Output:
 
 ```
-mio-progetto/
-├── .continue/
-│   ├── rules/
-│   │   ├── 00-project-overview.md   ← generato da agency init
-│   │   ├── 01-java-guidelines.md    ← sealed
-│   │   ├── 02-angular-guidelines.md ← sealed
-│   │   ├── 03-security.md           ← sealed
-│   │   ├── 04-task-runner.md        ← modificabile
-│   │   ├── 05-create-project.md     ← sealed
-│   │   └── 06-my-custom-rule.md     ← tue regole custom
-│   ├── agent.log                    ← log dell'ultima sessione task
-│   └── mcpServers/                  ← config server MCP
-└── tasks/
-    ├── create-project-ecommerce.md  ← crea un progetto da zero
-    ├── user-service.md              ← task di implementazione
-    └── .processed/                  ← task completati
+  🔍 Code Review in corso...
+
+  | Tipo     | File:riga           | Problema                   | Fix suggerito         |
+  |----------|---------------------|----------------------------|-----------------------|
+  | SECURITY | UserService.java:42 | Password loggata in chiaro | Rimuovi il log        |
+  | STYLE    | OrderCtrl.java:18   | Metodo supera 30 righe     | Estrai metodo privato |
+
+  ⚠ Verdetto: CHANGES_REQUESTED
 ```
 
 ---
@@ -407,6 +540,31 @@ provider:
 | LM Studio (locale) | `http://localhost:1234/v1` |
 | Groq | `https://api.groq.com/openai/v1` |
 | Azure OpenAI | `https://<resource>.openai.azure.com/openai/deployments/<model>` |
+
+---
+
+## Struttura del progetto
+
+Dopo `agency init`:
+
+```
+mio-progetto/
+├── .continue/
+│   ├── rules/
+│   │   ├── 00-project-overview.md   ← generato da agency init
+│   │   ├── 01-java-guidelines.md    ← sealed
+│   │   ├── 02-angular-guidelines.md ← sealed
+│   │   ├── 03-security.md           ← sealed
+│   │   ├── 04-task-runner.md        ← modificabile
+│   │   ├── 05-create-project.md     ← sealed
+│   │   └── 06-my-custom-rule.md     ← tue regole custom
+│   ├── agent.log                    ← log dell'ultima sessione task
+│   └── mcpServers/                  ← config server MCP
+└── tasks/
+    ├── create-project-ecommerce.md  ← crea un progetto da zero
+    ├── user-service.md              ← task di implementazione
+    └── .processed/                  ← task completati
+```
 
 ---
 
