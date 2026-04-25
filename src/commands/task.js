@@ -1,14 +1,28 @@
 import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync } from "fs";
 import { join, basename, dirname } from "path";
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 import chalk from "chalk";
 import { readConfig, syncInternalConfig, isConfigured } from "../agency-config.js";
 import BRAND from "../brand.js";
+
+const MAX_FIX_ATTEMPTS = 3;
 
 // ── Helpers terminale ──────────────────────────────────────────────────────────────
 
 function clearLine() {
   process.stdout.write("\r" + " ".repeat(process.stdout.columns ?? 120) + "\r");
+}
+
+function cols() { return Math.min(process.stdout.columns ?? 80, 80); }
+function hline() { return "─".repeat(cols() - 2); }
+
+function printBox(title, color = "cyan") {
+  const c = chalk[color];
+  console.log("");
+  console.log(c(`  ┌${hline()}┐`));
+  console.log(c(`  │`) + chalk.bold.white(` ${title}`.padEnd(cols() - 2)) + c(`│`));
+  console.log(c(`  └${hline()}┘`));
+  console.log("");
 }
 
 class Spinner {
@@ -24,10 +38,6 @@ class Spinner {
 
 // ── API helpers ──────────────────────────────────────────────────────────────
 
-/**
- * Streaming nascosto: accumula il testo completo senza stampare nulla.
- * Usato per il planning dove poi stampiamo il risultato formattato.
- */
 async function streamToString(apiBase, apiKey, model, messages) {
   const res = await fetch(`${apiBase}/chat/completions`, {
     method:  "POST",
@@ -45,19 +55,12 @@ async function streamToString(apiBase, apiKey, model, messages) {
       if (!line.startsWith("data: ")) continue;
       const raw = line.slice(6).trim();
       if (raw === "[DONE]") break;
-      try {
-        const delta = JSON.parse(raw).choices?.[0]?.delta?.content ?? "";
-        if (delta) full += delta;
-      } catch { /* chunk malformato */ }
+      try { const d = JSON.parse(raw).choices?.[0]?.delta?.content ?? ""; if (d) full += d; } catch {}
     }
   }
   return full;
 }
 
-/**
- * Streaming visibile: stampa ogni token in tempo reale con prefisso.
- * Ritorna il testo completo.
- */
 async function streamToScreen(apiBase, apiKey, model, messages, prefix = "  ") {
   const res = await fetch(`${apiBase}/chat/completions`, {
     method:  "POST",
@@ -77,13 +80,9 @@ async function streamToScreen(apiBase, apiKey, model, messages, prefix = "  ") {
       const raw = line.slice(6).trim();
       if (raw === "[DONE]") break;
       try {
-        const delta = JSON.parse(raw).choices?.[0]?.delta?.content ?? "";
-        if (delta) {
-          // Ogni newline viene indentata col prefisso
-          process.stdout.write(delta.replace(/\n/g, `\n${prefix}`));
-          full += delta;
-        }
-      } catch { /* chunk malformato */ }
+        const d = JSON.parse(raw).choices?.[0]?.delta?.content ?? "";
+        if (d) { process.stdout.write(d.replace(/\n/g, `\n${prefix}`)); full += d; }
+      } catch {}
     }
   }
   process.stdout.write("\n");
@@ -175,7 +174,7 @@ function javaRulesBlock(rules) {
     .join("\n\n---\n\n");
 }
 
-// ── Estrazione file dai blocchi di codice LLM ──────────────────────────────
+// ── Estrazione e scrittura file ─────────────────────────────────────────────────
 
 function extractFilesFromOutput(text) {
   const results = [];
@@ -353,17 +352,162 @@ function scaffoldProject(meta, cwd) {
   }
 }
 
-// ── Box di intestazione step ──────────────────────────────────────────────────
+// ── mvn test con auto-fix loop ──────────────────────────────────────────────────
+
+/**
+ * Legge i file sorgenti Java del progetto per fornirli all'LLM come contesto.
+ * Limita la lettura a ~40 file e ~80KB totali per evitare context overflow.
+ */
+function readProjectSources(projectDir) {
+  const sources = [];
+  let totalChars = 0;
+  const MAX_CHARS = 80_000;
+  const MAX_FILES = 40;
+
+  function walk(dir) {
+    if (sources.length >= MAX_FILES || totalChars >= MAX_CHARS) return;
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (sources.length >= MAX_FILES || totalChars >= MAX_CHARS) break;
+      const full = join(dir, e.name);
+      if (e.isDirectory()) {
+        // salta target/, .git/, node_modules/
+        if (!["target", ".git", "node_modules", ".mvn"].includes(e.name)) walk(full);
+      } else if (/\.(java|kt|xml|yml|yaml|properties)$/.test(e.name)) {
+        try {
+          const content = readFileSync(full, "utf8");
+          const rel     = full.replace(projectDir + "/", "");
+          sources.push({ rel, content: content.slice(0, 4000) });
+          totalChars += content.length;
+        } catch { /* ignora */ }
+      }
+    }
+  }
+
+  walk(projectDir);
+  return sources;
+}
+
+/**
+ * Esegue mvn test. Se fallisce, chiede all'LLM di fixare gli errori in
+ * streaming visibile, riscrive i file corretti e riprova. Max MAX_FIX_ATTEMPTS.
+ *
+ * Ritorna true se alla fine BUILD SUCCESS, false altrimenti.
+ */
+async function runMvnWithRetry(projectDir, cwd, history, apiBase, apiKey, model, logLines) {
+  let attempt = 0;
+
+  while (attempt <= MAX_FIX_ATTEMPTS) {
+    const isRetry = attempt > 0;
+    const label   = isRetry
+      ? `⚙️  mvn test — Fix automatico ${attempt}/${MAX_FIX_ATTEMPTS}`
+      : `⚙️  Fase 3 — mvn test`;
+    const boxColor = isRetry ? "yellow" : "cyan";
+
+    printBox(label, boxColor);
+
+    // Cattura stdout+stderr di maven
+    const mvnResult = spawnSync("mvn", ["test"], {
+      cwd:     projectDir,
+      timeout: 120000,
+      encoding: "utf8",
+    });
+
+    const mvnOut = (mvnResult.stdout ?? "") + (mvnResult.stderr ?? "");
+
+    // Stampa output maven a schermo
+    if (mvnOut.trim()) {
+      mvnOut.split("\n").forEach(l => process.stdout.write(chalk.dim(`  ${l}\n`)));
+    }
+
+    if (mvnResult.status === 0) {
+      // ✔ Successo
+      console.log(chalk.green(`\n  ✔ mvn test — BUILD SUCCESS${isRetry ? ` (dopo ${attempt} fix)` : ""}\n`));
+      logLines.push(`## mvn test\nBUILD SUCCESS (attempt ${attempt + 1})\n`);
+      return true;
+    }
+
+    // ✖ Fallito
+    console.log(chalk.red(`\n  ✖ BUILD FAILED (tentativo ${attempt + 1}/${MAX_FIX_ATTEMPTS + 1})\n`));
+    logLines.push(`## mvn test (attempt ${attempt + 1})\nBUILD FAILED\n\`\`\`\n${mvnOut.slice(-3000)}\n\`\`\`\n`);
+
+    if (attempt >= MAX_FIX_ATTEMPTS) break;
+
+    // ── Chiedi all'LLM di fixare gli errori ───────────────────────────────────
+    const fixLabel = `🔧  Auto-fix ${attempt + 1}/${MAX_FIX_ATTEMPTS} — Analisi errori in corso...`;
+    printBox(fixLabel, "yellow");
+
+    // Leggi i sorgenti attuali per darli all'LLM come contesto
+    const sources    = readProjectSources(projectDir);
+    const sourcesDump = sources
+      .map(s => `### ${s.rel}\n\`\`\`\n${s.content}\n\`\`\`\n`)
+      .join("\n");
+
+    // Estrai solo le righe di errore rilevanti dall'output Maven
+    const errorLines = mvnOut
+      .split("\n")
+      .filter(l => /\[ERROR\]|FAILED|error:|ERROR|Exception|cannot find symbol|does not override/i.test(l))
+      .slice(0, 80)
+      .join("\n");
+
+    const fixPrompt = `mvn test ha fallito con i seguenti errori:
+
+\`\`\`
+${errorLines || mvnOut.slice(-2000)}
+\`\`\`
+
+Ecco i file sorgenti attuali del progetto:
+
+${sourcesDump}
+
+Analizza gli errori e riscrivi SOLO i file che devono essere modificati per far passare i test.
+Per ogni file che modifichi, includi il percorso completo nella prima riga come commento:
+
+\`\`\`java
+// ${basename(projectDir)}/src/main/java/com/example/.../NomeFile.java
+<codice corretto completo>
+\`\`\`
+
+Scrivi SOLO i file modificati. Non scrivere file che non cambiano.`;
+
+    history.push({ role: "user", content: fixPrompt });
+
+    let fixOutput = "";
+    try {
+      console.log(chalk.dim(`  Streaming fix in corso...\n`));
+      fixOutput = await streamToScreen(apiBase, apiKey, model, history, "  ");
+    } catch (err) {
+      console.log(chalk.red(`  Errore durante il fix: ${err.message}\n`));
+      break;
+    }
+
+    history.push({ role: "assistant", content: fixOutput });
+    logLines.push(`## Auto-fix attempt ${attempt + 1}\n\n${fixOutput}\n`);
+
+    // Sovrascrivi i file con le versioni corrette
+    const fixedFiles = extractFilesFromOutput(fixOutput);
+    const written    = writeExtractedFiles(fixedFiles, cwd);
+
+    if (written.length > 0) {
+      console.log("");
+      written.forEach(f => console.log(chalk.green(`  └ ✔ `) + chalk.dim(f) + chalk.green(" [fixato]")));
+      console.log("");
+    } else {
+      console.log(chalk.yellow(`  ⚠  Nessun file fixato estratto — aborto retry\n`));
+      break;
+    }
+
+    attempt++;
+  }
+
+  return false;
+}
+
+// ── Box step header/footer ────────────────────────────────────────────────────
 
 function printStepHeader(stepNum, total, label) {
-  const cols  = Math.min(process.stdout.columns ?? 80, 80);
-  const title = `  Step ${stepNum}/${total}: ${label}`;
-  const line  = "─".repeat(cols - 2);
-  console.log("");
-  console.log(chalk.cyan(`  ┌${line}┐`));
-  console.log(chalk.cyan(`  │`) + chalk.bold.white(` ▶ ${title.padEnd(cols - 4)} `) + chalk.cyan(`│`));
-  console.log(chalk.cyan(`  └${line}┘`));
-  console.log("");
+  printBox(`▶ Step ${stepNum}/${total}: ${label}`);
 }
 
 function printStepFooter(written) {
@@ -422,21 +566,16 @@ export async function task(file, opts) {
       projectDir     = result.projectDir;
       scaffoldMethod = result.method;
       scaffoldSpin.stop(
-        chalk.green(`  \u2714 Scaffold: ${projectMeta.artifactId}/`) +
+        chalk.green(`  ✔ Scaffold: ${projectMeta.artifactId}/`) +
         chalk.dim(`  [${scaffoldMethod === "initializr" ? "start.spring.io" : "fallback manuale"}]\n`)
       );
     } catch (err) {
-      scaffoldSpin.stop(chalk.yellow(`  \u26A0  Scaffold fallito (${err.message}), continuo\n`));
+      scaffoldSpin.stop(chalk.yellow(`  ⚠  Scaffold fallito (${err.message}), continuo\n`));
     }
   }
 
-  // ── FASE 1: Planning (streaming nascosto, poi stampa formattata) ──────────
-  const cols = Math.min(process.stdout.columns ?? 80, 80);
-  const line = "─".repeat(cols - 2);
-  console.log(chalk.bold.cyan(`  ┌${line}┐`));
-  console.log(chalk.bold.cyan(`  │`) + chalk.bold.white("  🗺\uFE0F  Fase 1 — Analisi & Piano di esecuzione".padEnd(cols - 2)) + chalk.bold.cyan(`│`));
-  console.log(chalk.bold.cyan(`  └${line}┘`));
-  console.log("");
+  // ── FASE 1: Planning ──────────────────────────────────────────────────
+  printBox("🗺\uFE0F  Fase 1 — Analisi & Piano di esecuzione");
 
   const projectRootHint = projectDir && projectMeta
     ? `\n\nIl progetto è già stato creato in: ${projectMeta.artifactId}/\nPackage base: ${projectMeta.pkg}\nTutti i percorsi dei file che scrivi devono essere relativi a ${projectMeta.artifactId}/ (es: ${projectMeta.artifactId}/src/main/java/${projectMeta.pkg.replace(/\./g,"/")}/HelloController.java)`
@@ -474,8 +613,6 @@ Senza il percorso nella prima riga, il file NON verrà salvato su disco.`;
 
   let planText;
   try {
-    // Streaming nascosto per il planning: accumuliamo il testo
-    // e lo stampiamo formattato dopo (per poter estrarre gli step)
     const planSpin = new Spinner("L'LLM sta elaborando il piano...").start();
     planText = await streamToString(apiBase, apiKey, model, history);
     planSpin.stop();
@@ -492,15 +629,13 @@ Senza il percorso nella prima riga, il file NON verrà salvato su disco.`;
   steps.forEach((s, i) => console.log(chalk.dim(`    ${chalk.cyan(i + 1 + ".")} ${s}`)));
   if (javaRules) console.log(chalk.dim(`\n  ✓ Regole Java attive nel contesto`));
 
-  // ── FASE 2: Esecuzione step (streaming visibile per ogni step) ─────────
+  // ── FASE 2: Esecuzione step ───────────────────────────────────────────────
   const results    = [];
   const logLines   = [];
   const allWritten = [];
 
   for (let i = 0; i < total; i++) {
     const stepLabel = steps[i];
-
-    // Header box per lo step corrente
     printStepHeader(i + 1, total, stepLabel);
 
     const javaReminder = isCreateProject && javaRules
@@ -524,7 +659,6 @@ ${javaReminder}`;
 
     let stepOutput = "";
     try {
-      // ▶ OUTPUT IN TEMPO REALE — ogni token viene stampato subito
       stepOutput = await streamToScreen(apiBase, apiKey, model, history, "  ");
     } catch (err) {
       console.log(chalk.yellow(`\n  ⚠  Step ${i + 1} fallito: ${err.message}`));
@@ -544,30 +678,14 @@ ${javaReminder}`;
     results.push({ step: stepLabel, ok: true, written });
   }
 
-  // ── FASE 3: mvn test ────────────────────────────────────────────────────
+  // ── FASE 3: mvn test con auto-fix retry ───────────────────────────────────
+  let mvnSuccess = false;
   if (isCreateProject && projectDir && existsSync(join(projectDir, "pom.xml"))) {
-    console.log("");
-    console.log(chalk.bold.cyan(`  ┌${line}┐`));
-    console.log(chalk.bold.cyan(`  │`) + chalk.bold.white("  ⚙️  Fase 3 — mvn test".padEnd(cols - 2)) + chalk.bold.cyan(`│`));
-    console.log(chalk.bold.cyan(`  └${line}┘`));
-    console.log("");
-    try {
-      // spawn per vedere l'output Maven in tempo reale
-      const { spawnSync } = await import("child_process");
-      const mvn = spawnSync("mvn", ["test"], {
-        cwd:     projectDir,
-        stdio:   "inherit",
-        timeout: 120000,
-      });
-      if (mvn.status === 0) {
-        console.log(chalk.green(`\n  ✔ mvn test — BUILD SUCCESS\n`));
-        logLines.push(`## mvn test\nBUILD SUCCESS\n`);
-      } else {
-        console.log(chalk.yellow(`\n  ⚠  mvn test — BUILD FAILED\n`));
-        logLines.push(`## mvn test\nBUILD FAILED\n`);
-      }
-    } catch (err) {
-      console.log(chalk.yellow(`  ⚠  mvn test: ${err.message}\n`));
+    mvnSuccess = await runMvnWithRetry(
+      projectDir, cwd, history, apiBase, apiKey, model, logLines
+    );
+    if (!mvnSuccess) {
+      console.log(chalk.red(`  ✖ Superati ${MAX_FIX_ATTEMPTS} tentativi di fix automatico. Controlla manualmente.\n`));
     }
   }
 
@@ -575,12 +693,7 @@ ${javaReminder}`;
   const ok     = results.filter(r => r.ok).length;
   const failed = results.filter(r => !r.ok).length;
 
-  console.log("");
-  console.log(chalk.bold.cyan(`  ┌${line}┐`));
-  console.log(chalk.bold.cyan(`  │`) + chalk.bold.white("  ✔  Riepilogo".padEnd(cols - 2)) + chalk.bold.cyan(`│`));
-  console.log(chalk.bold.cyan(`  └${line}┘`));
-  console.log("");
-  console.log(`  ${chalk.green(ok + " step completati")}${failed ? "  " + chalk.yellow(failed + " falliti") : ""}\n`);
+  printBox(`✔  Riepilogo — ${ok} step OK${failed ? `  ⚠ ${failed} falliti` : ""}${isCreateProject ? (mvnSuccess ? "  ✔ tests pass" : "  ✖ tests failed") : ""}`);
 
   results.forEach((r, i) => {
     const icon = r.ok ? chalk.green("  ✔") : chalk.yellow("  ⚠");
@@ -598,8 +711,12 @@ ${javaReminder}`;
   }
 
   if (isCreateProject && projectMeta) {
-    console.log(chalk.cyan(`  \uD83D\uDE80 Per avviare il progetto:\n`));
-    console.log(chalk.bold(`     cd ${projectMeta.artifactId} && mvn spring-boot:run\n`));
+    if (mvnSuccess) {
+      console.log(chalk.cyan(`  \uD83D\uDE80 Per avviare il progetto:\n`));
+      console.log(chalk.bold(`     cd ${projectMeta.artifactId} && mvn spring-boot:run\n`));
+    } else {
+      console.log(chalk.yellow(`  ⚠  I test non passano. Rivedi manualmente il codice in ${projectMeta.artifactId}/\n`));
+    }
   }
 
   // Salva log
