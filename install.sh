@@ -30,6 +30,12 @@ echo -e "${CYAN}${BOLD}===============================================${NC}"
 echo ""
 
 # ============================================================================
+# 0. Fix permessi bin/agency (necessario se git non preserva i bit)
+# ============================================================================
+chmod +x "$ROOT_DIR/bin/agency" 2>/dev/null || true
+ok "bin/agency: chmod +x applicato"
+
+# ============================================================================
 # 1. Rileva OS
 # ============================================================================
 detect_os() {
@@ -73,29 +79,23 @@ hdr "[2/4] Continue CLI (cn)"
 
 CN_BIN=""
 if command -v cn >/dev/null 2>&1; then
-  ok "cn gia\u2019 installato: $(cn --version 2>/dev/null || echo 'ok')"
+  ok "cn gia' installato: $(cn --version 2>/dev/null || echo 'ok')"
   CN_BIN="$(command -v cn)"
 else
-  # --- Prova installazione globale ---
   info "Installo @continuedev/cli globalmente..."
   if npm install -g @continuedev/cli 2>/dev/null; then
     ok "Installato globalmente."
     CN_BIN="$(command -v cn)"
   else
-    # --- Fallback: installazione locale nella cartella .agency/ ---
     warn "Installazione globale fallita (permessi insufficienti?)"
     warn "Fallback: installazione locale in .agency/node_modules/"
 
     mkdir -p "$ROOT_DIR/.agency"
     npm install --prefix "$ROOT_DIR/.agency" @continuedev/cli
 
-    if [ ! -f "$LOCAL_CN" ]; then
-      err "Installazione locale completata ma cn non trovato in $LOCAL_CN"
-    fi
-
+    [ -f "$LOCAL_CN" ] || err "cn non trovato in $LOCAL_CN dopo installazione locale."
     CN_BIN="$LOCAL_CN"
 
-    # Crea wrapper cn nella directory locale del progetto
     WRAPPER="$ROOT_DIR/.agency/bin/cn"
     mkdir -p "$(dirname "$WRAPPER")"
     cat > "$WRAPPER" <<WEOF
@@ -104,21 +104,15 @@ exec "$LOCAL_CN" "\$@"
 WEOF
     chmod +x "$WRAPPER"
 
-    # Aggiorna PATH nella shell dell'utente
     SHELL_RC=""
-    if [ -f "$HOME/.zshrc" ];  then SHELL_RC="$HOME/.zshrc"
-    elif [ -f "$HOME/.bashrc" ]; then SHELL_RC="$HOME/.bashrc"
-    fi
+    [ -f "$HOME/.zshrc" ]  && SHELL_RC="$HOME/.zshrc"
+    [ -z "$SHELL_RC" ] && [ -f "$HOME/.bashrc" ] && SHELL_RC="$HOME/.bashrc"
     if [ -n "$SHELL_RC" ]; then
-      EXPORT_LINE="export PATH=\"\$PATH:$ROOT_DIR/.agency/bin\""
       if ! grep -Fq "$ROOT_DIR/.agency/bin" "$SHELL_RC" 2>/dev/null; then
-        echo "" >> "$SHELL_RC"
-        echo "# Agency CLI — fallback locale cn" >> "$SHELL_RC"
-        echo "$EXPORT_LINE" >> "$SHELL_RC"
-        ok "PATH aggiornato in $SHELL_RC — riapri il terminale o esegui: source $SHELL_RC"
+        { echo ""; echo "# Agency CLI — fallback locale cn"; echo "export PATH=\"\$PATH:$ROOT_DIR/.agency/bin\""; } >> "$SHELL_RC"
+        ok "PATH aggiornato in $SHELL_RC — riapri il terminale o: source $SHELL_RC"
       fi
     fi
-
     export PATH="$PATH:$ROOT_DIR/.agency/bin"
     ok "cn disponibile localmente: $WRAPPER"
   fi
@@ -130,31 +124,29 @@ fi
 hdr "[3/4] File watcher"
 
 if command -v fswatch >/dev/null 2>&1; then
-  ok "fswatch gia\u2019 installato."
+  ok "fswatch gia' installato."
 elif command -v inotifywait >/dev/null 2>&1; then
-  ok "inotifywait gia\u2019 installato."
+  ok "inotifywait gia' installato."
 else
   if [ "$OS" = "macos" ]; then
     if command -v brew >/dev/null 2>&1; then
       info "Installo fswatch con Homebrew..."
-      brew install fswatch && ok "fswatch installato." || warn "fswatch non installato. Installa manualmente: brew install fswatch"
+      brew install fswatch && ok "fswatch installato." || warn "Installa manualmente: brew install fswatch"
     else
-      warn "Homebrew non trovato. Installa fswatch manualmente: brew install fswatch"
-      warn "Installa Homebrew da https://brew.sh se necessario."
+      warn "Homebrew non trovato. Installa da https://brew.sh poi: brew install fswatch"
     fi
   elif [ "$OS" = "linux" ]; then
     if command -v apt-get >/dev/null 2>&1; then
-      info "Installo inotify-tools..."
       sudo apt-get update -qq && sudo apt-get install -y inotify-tools && ok "inotify-tools installato."
     elif command -v dnf >/dev/null 2>&1; then
       sudo dnf install -y inotify-tools && ok "inotify-tools installato."
     elif command -v pacman >/dev/null 2>&1; then
       sudo pacman -Sy --noconfirm inotify-tools && ok "inotify-tools installato."
     else
-      warn "Installa inotify-tools manualmente col tuo package manager."
+      warn "Installa inotify-tools col tuo package manager."
     fi
   elif [ "$OS" = "windows" ]; then
-    warn "Su Windows il file watcher non e\u2019 necessario (usa PowerShell Watch o l'IDE)."
+    warn "Su Windows il file watcher non e' necessario."
   fi
 fi
 
@@ -182,21 +174,23 @@ tabAutocompleteModel:
 YAML
   ok "Creato ~/.continue/config.yaml"
 else
-  ok "~/.continue/config.yaml gia\u2019 presente."
+  ok "~/.continue/config.yaml gia' presente."
 fi
 
 # ============================================================================
-# 6. Installa agency CLI (npm link o fallback locale)
+# 6. Installa agency (npm link o fallback wrapper locale)
 # ============================================================================
 cd "$ROOT_DIR"
-info "Installo dipendenze npm del progetto..."
+info "Installo dipendenze npm..."
 npm install --silent
+
+# Assicura sempre il bit eseguibile su bin/agency
+chmod +x "$ROOT_DIR/bin/agency"
 
 if npm link 2>/dev/null; then
   ok "agency disponibile globalmente (npm link)"
 else
-  warn "npm link fallito (permessi). Creo wrapper locale agency..."
-
+  warn "npm link fallito. Creo wrapper locale agency..."
   AGENCY_WRAPPER="$ROOT_DIR/.agency/bin/agency"
   mkdir -p "$(dirname "$AGENCY_WRAPPER")"
   cat > "$AGENCY_WRAPPER" <<WEOF
@@ -206,39 +200,30 @@ WEOF
   chmod +x "$AGENCY_WRAPPER"
 
   SHELL_RC=""
-  if [ -f "$HOME/.zshrc" ];  then SHELL_RC="$HOME/.zshrc"
-  elif [ -f "$HOME/.bashrc" ]; then SHELL_RC="$HOME/.bashrc"
-  fi
+  [ -f "$HOME/.zshrc" ]  && SHELL_RC="$HOME/.zshrc"
+  [ -z "$SHELL_RC" ] && [ -f "$HOME/.bashrc" ] && SHELL_RC="$HOME/.bashrc"
   if [ -n "$SHELL_RC" ]; then
-    EXPORT_LINE="export PATH=\"\$PATH:$ROOT_DIR/.agency/bin\""
     if ! grep -Fq "$ROOT_DIR/.agency/bin" "$SHELL_RC" 2>/dev/null; then
-      echo "" >> "$SHELL_RC"
-      echo "# Agency CLI" >> "$SHELL_RC"
-      echo "$EXPORT_LINE" >> "$SHELL_RC"
+      { echo ""; echo "# Agency CLI"; echo "export PATH=\"\$PATH:$ROOT_DIR/.agency/bin\""; } >> "$SHELL_RC"
       ok "PATH aggiornato in $SHELL_RC"
     fi
   fi
   export PATH="$PATH:$ROOT_DIR/.agency/bin"
-  ok "agency disponibile come wrapper locale: $AGENCY_WRAPPER"
+  ok "agency disponibile come wrapper: $AGENCY_WRAPPER"
 fi
 
 # ============================================================================
-# Fine
+# Done
 # ============================================================================
 echo ""
 echo -e "${GREEN}${BOLD}================================================${NC}"
 echo -e "${GREEN}${BOLD}  Installazione completata!${NC}"
 echo -e "${GREEN}${BOLD}================================================${NC}"
 echo ""
-echo -e "  Prossimi passi:\n"
-echo -e "  ${CYAN}1.${NC} Configura il tuo provider AI:"
-echo -e "     ${BOLD}agency models${NC}"
-echo ""
-echo -e "  ${CYAN}2.${NC} Inizializza un progetto:"
-echo -e "     ${BOLD}cd mio-progetto && agency init${NC}"
+echo -e "  ${CYAN}1.${NC} Configura il provider AI:  ${BOLD}agency models${NC}"
+echo -e "  ${CYAN}2.${NC} Inizializza un progetto:   ${BOLD}cd tuo-progetto && agency init${NC}"
 echo ""
 if echo "$PATH" | grep -q ".agency/bin"; then
-  echo -e "  ${YELLOW}Nota:${NC} Se 'agency' non viene trovato, esegui:"
-  echo -e "     ${BOLD}source ~/.zshrc${NC}  oppure  ${BOLD}source ~/.bashrc${NC}"
-  echo ""
+  echo -e "  ${YELLOW}Nota:${NC} Se 'agency' non viene trovato dopo la chiusura del terminale, esegui:"
+  echo -e "     ${BOLD}source ~/.zshrc${NC}  oppure  ${BOLD}source ~/.bashrc${NC}\n"
 fi
