@@ -63,6 +63,12 @@ export function hasModel() {
   return model.length > 0 && model !== '""';
 }
 
+/**
+ * Scrive ~/.continue/config.yaml nel formato atteso da Continue CLI.
+ * - name e version sono obbligatori (altrimenti cn fallisce con "name: Required")
+ * - CONTINUE_CONFIG_PATH viene impostata come env var globale cosi cn
+ *   usa sempre questo file e non chiede mai il login
+ */
 export function syncInternalConfig() {
   const cfg   = readConfig();
   const url   = cfg?.provider?.url   ?? "";
@@ -76,7 +82,7 @@ export function syncInternalConfig() {
   if (base.endsWith("/v1")) base = base.slice(0, -3);
   const apiBase = base + "/v1";
 
-  // Continue richiede name e version obbligatoriamente al top level
+  // name e version sono campi OBBLIGATORI per Continue
   const internalConfig = {
     name: BRAND.displayName,
     version: "1",
@@ -99,4 +105,9 @@ export function syncInternalConfig() {
   };
 
   writeFileSync(CN_CONFIG_PATH, yaml.dump(internalConfig, { indent: 2 }), "utf8");
+
+  // Forza Continue a usare sempre questo config senza chiedere login
+  process.env.CONTINUE_CONFIG_PATH  = CN_CONFIG_PATH;
+  process.env.CONTINUE_GLOBAL_DIR   = CN_CONFIG_DIR;
+  process.env.CONTINUE_NO_TELEMETRY = "1";
 }

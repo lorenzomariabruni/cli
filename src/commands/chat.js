@@ -1,7 +1,7 @@
 import { execa } from "execa";
 import chalk from "chalk";
 import { FULL_FLAGS, READ_FLAGS, getModel } from "../config.js";
-import { buildCnArgs, warnIfNotInitialized } from "../utils.js";
+import { buildCnArgs, warnIfNotInitialized, getCnEnv } from "../utils.js";
 import { roleSystemPrompt } from "../roles.js";
 
 export async function chat(opts) {
@@ -15,5 +15,5 @@ export async function chat(opts) {
     readonly: opts.readonly, auto: opts.auto, model,
     flags: opts.readonly ? READ_FLAGS : FULL_FLAGS,
   });
-  await execa("cn", args, { stdio: "inherit" }).catch(() => process.exit(1));
+  await execa("cn", args, { stdio: "inherit", env: getCnEnv() }).catch(() => process.exit(1));
 }

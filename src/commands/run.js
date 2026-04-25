@@ -3,7 +3,7 @@ import { writeFileSync } from "fs";
 import chalk from "chalk";
 import ora from "ora";
 import { FULL_FLAGS, READ_FLAGS, getModel } from "../config.js";
-import { buildCnArgs, warnIfNotInitialized } from "../utils.js";
+import { buildCnArgs, warnIfNotInitialized, getCnEnv } from "../utils.js";
 import { roleSystemPrompt } from "../roles.js";
 
 export async function run(prompt, opts) {
@@ -17,7 +17,7 @@ export async function run(prompt, opts) {
     flags: opts.readonly ? READ_FLAGS : FULL_FLAGS,
   });
   try {
-    const { stdout } = await execa("cn", args);
+    const { stdout } = await execa("cn", args, { env: getCnEnv() });
     spinner.stop();
     if (opts.output) { writeFileSync(opts.output, stdout, "utf8"); console.log(chalk.green(`  Salvato: ${opts.output}`)); }
     else console.log(stdout);

@@ -4,7 +4,7 @@ import { join } from "path";
 import chalk from "chalk";
 import ora from "ora";
 import { READ_FLAGS, getModel } from "../config.js";
-import { buildCnArgs } from "../utils.js";
+import { buildCnArgs, getCnEnv } from "../utils.js";
 import { roleSystemPrompt } from "../roles.js";
 export async function mcpQuery(prompt, opts) {
   const mcpDir = join(process.cwd(), ".continue", "mcpServers");
@@ -17,7 +17,7 @@ export async function mcpQuery(prompt, opts) {
   const spinner = ora("Query MCP...").start();
   const args = buildCnArgs({ prompt: fullPrompt, headless: true, auto: true, readonly: true, model: getModel(), flags: READ_FLAGS });
   try {
-    const { stdout } = await execa("cn", args);
+    const { stdout } = await execa("cn", args, { env: getCnEnv() });
     spinner.stop();
     const output = `# MCP Query\n> ${new Date().toISOString()}\n> ${prompt}\n\n${stdout}`;
     if (opts.output) { writeFileSync(opts.output, output, "utf8"); console.log(chalk.green(`  Salvato: ${opts.output}`)); }

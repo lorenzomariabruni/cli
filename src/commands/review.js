@@ -3,7 +3,7 @@ import { writeFileSync } from "fs";
 import chalk from "chalk";
 import ora from "ora";
 import { READ_FLAGS, getModel } from "../config.js";
-import { buildCnArgs, warnIfNotInitialized } from "../utils.js";
+import { buildCnArgs, warnIfNotInitialized, getCnEnv } from "../utils.js";
 
 export async function review(opts) {
   warnIfNotInitialized();
@@ -15,7 +15,7 @@ export async function review(opts) {
   const spinner = ora("Analisi...").start();
   const args = buildCnArgs({ prompt, headless: true, readonly: true, auto: true, model: getModel(), flags: READ_FLAGS });
   try {
-    const { stdout } = await execa("cn", args);
+    const { stdout } = await execa("cn", args, { env: getCnEnv() });
     spinner.stop();
     const output = `# Code Review\n> ${new Date().toISOString()}\n\n${stdout}`;
     if (opts.output) { writeFileSync(opts.output, output, "utf8"); console.log(chalk.green(`  Salvato: ${opts.output}`)); }

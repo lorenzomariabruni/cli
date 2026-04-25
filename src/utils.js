@@ -2,8 +2,26 @@ import chalk from "chalk";
 import { join } from "path";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
+import { homedir } from "os";
 import BRAND from "./brand.js";
 import RULES from "./rules/index.js";
+
+/**
+ * Env vars passate a OGNI processo cn invocato.
+ * Impediscono il prompt di login e forzano l'uso del config file locale.
+ */
+export function getCnEnv() {
+  const cnConfigDir  = join(homedir(), ".continue");
+  const cnConfigPath = join(cnConfigDir, "config.yaml");
+  return {
+    ...process.env,
+    CONTINUE_CONFIG_PATH:  cnConfigPath,
+    CONTINUE_GLOBAL_DIR:   cnConfigDir,
+    CONTINUE_NO_TELEMETRY: "1",
+    // Alcune versioni di cn rispettano questa variabile per saltare l'auth
+    CONTINUE_API_KEY:      process.env.CONTINUE_API_KEY ?? "local",
+  };
+}
 
 export function buildCnArgs({ prompt, headless, resume, readonly, auto, model, flags = [] }) {
   const args = [];
@@ -38,7 +56,7 @@ export function enforceRules() {
 export async function checkDependencies() {
   const { execSync } = await import("child_process");
   try { execSync("cn --version", { stdio: "ignore" }); } catch {
-    console.error(chalk.red("  Missing dependency. Check installation.\n"));
+    console.error(chalk.red(`  Dipendenza mancante: @continuedev/cli\n  Installa con: npm i -g @continuedev/cli\n`));
     process.exit(1);
   }
 }
