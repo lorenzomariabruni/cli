@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync } from "fs";
 import { join, basename, dirname } from "path";
 import { execSync } from "child_process";
 import chalk from "chalk";
@@ -46,33 +46,106 @@ async function callAPI(apiBase, apiKey, model, messages) {
   return (await res.json()).choices?.[0]?.message?.content ?? "";
 }
 
-// ── Estrazione file dai blocchi di codice LLM ────────────────────────────────
+// ── Rules loader — con supporto frontmatter ───────────────────────────────────
 //
-// Formati supportati (tutti usati dagli LLM in natura):
+// Ogni regola ha frontmatter YAML:
+//   ---
+//   name: Java Guidelines
+//   alwaysApply: true        <- inclusa in TUTTI i task
+//   globs: ["tasks/*.md"]   <- inclusa solo se il task file corrisponde
+//   ---
 //
-//   ```java
-//   // src/main/java/com/example/Foo.java
-//   <codice>
-//   ```
+// Logica:
+//   - alwaysApply: true  -> inclusa sempre, testo completo
+//   - glob match         -> inclusa se il task path corrisponde al glob
+//   - altro              -> non inclusa
 //
-//   ```xml
-//   <!-- pom.xml -->
-//   <codice>
-//   ```
-//
-//   ```yaml
-//   # src/main/resources/application.yml
-//   <codice>
-//   ```
-//
-//   **`src/main/java/com/example/Foo.java`**
-//   ```java
-//   <codice>
-//   ```
-//
-// Ritorna array di { filePath, code }
+// Ritorna { always: Rule[], byGlob: Rule[] }
+// dove Rule = { file, name, body, raw }
 
-function extractFilesFromOutput(text, projectRoot = "") {
+function parseFrontmatter(raw) {
+  const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?/);
+  if (!fmMatch) return { alwaysApply: false, globs: [], name: null, body: raw };
+  const fm   = fmMatch[1];
+  const body = raw.slice(fmMatch[0].length).trim();
+
+  const alwaysApply = /alwaysApply:\s*true/i.test(fm);
+  const nameMatch   = fm.match(/^name:\s*(.+)/m);
+  const name        = nameMatch?.[1]?.trim() ?? null;
+
+  // Globs: globs: ["*.ts", "*.html"]  oppure  globs: [*.ts]
+  const globsMatch = fm.match(/globs:\s*\[([^\]]+)\]/);
+  const globs      = globsMatch
+    ? globsMatch[1].split(",").map(g => g.trim().replace(/["']/g, "")).filter(Boolean)
+    : [];
+
+  return { alwaysApply, globs, name, body };
+}
+
+function globMatches(pattern, filePath) {
+  // Minimatch-lite: converte * e ** in regex
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*/g, "\uFFFD")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\uFFFD/g, ".*");
+  return new RegExp(`^${escaped}$`).test(filePath);
+}
+
+function loadRules(cwd, taskFilePath = "") {
+  const rulesDir = join(cwd, ".continue", "rules");
+  if (!existsSync(rulesDir)) return { always: [], byGlob: [], summary: "(nessuna regola trovata)" };
+
+  const always  = [];
+  const byGlob  = [];
+
+  for (const file of readdirSync(rulesDir).filter(f => f.endsWith(".md")).sort()) {
+    const raw  = readFileSync(join(rulesDir, file), "utf8");
+    const meta = parseFrontmatter(raw);
+
+    if (meta.alwaysApply) {
+      always.push({ file, name: meta.name ?? file, body: meta.body, raw });
+    } else if (meta.globs.length > 0 && taskFilePath) {
+      const rel = taskFilePath.replace(cwd + "/", "").replace(cwd + "\\", "");
+      const matches = meta.globs.some(g => globMatches(g, rel) || globMatches(g, basename(taskFilePath)));
+      if (matches) byGlob.push({ file, name: meta.name ?? file, body: meta.body, raw });
+    }
+  }
+
+  // Summary breve per il planning (tutti)
+  const allRules = [...always, ...byGlob];
+  const summary = allRules.length > 0
+    ? allRules.map(r => `### ${r.name ?? r.file}\n${r.body.slice(0, 600)}`).join("\n\n")
+    : "(nessuna regola trovata — segui best practice standard)";
+
+  return { always, byGlob, summary, allRules };
+}
+
+// Costruisce il blocco regole da inserire nel system prompt
+// Per i task Java usa il testo COMPLETO delle regole alwaysApply + glob match
+function buildRulesBlock(rules, maxCharsPerRule = 3000) {
+  if (rules.allRules.length === 0) return "(nessuna regola trovata — segui best practice standard)";
+  return rules.allRules
+    .map(r => `### REGOLA: ${r.name ?? r.file}\n${r.body.slice(0, maxCharsPerRule)}`)
+    .join("\n\n---\n\n");
+}
+
+// Filtra le regole rilevanti per Java/Spring Boot
+function javaRulesBlock(rules) {
+  const javaRules = rules.allRules.filter(r =>
+    /java|spring|maven|kotlin/i.test(r.file) ||
+    /java|spring|maven|kotlin/i.test(r.name ?? "") ||
+    /java|spring|@SpringBoot|@RestController|lombok/i.test(r.body.slice(0, 200))
+  );
+  if (javaRules.length === 0) return null;
+  return javaRules
+    .map(r => `### REGOLA JAVA: ${r.name ?? r.file}\n${r.body}`)
+    .join("\n\n---\n\n");
+}
+
+// ── Estrazione file dai blocchi di codice LLM ──────────────────────────────
+
+function extractFilesFromOutput(text) {
   const results = [];
 
   // Pattern 1: path come prima riga del blocco (commento Java/XML/YAML/properties)
@@ -81,22 +154,18 @@ function extractFilesFromOutput(text, projectRoot = "") {
   while ((m = inlinePathRe.exec(text)) !== null) {
     const filePath = m[1].trim();
     const code     = m[2].trim();
-    if (isValidFilePath(filePath) && code) {
-      results.push({ filePath: projectRoot ? join(projectRoot, filePath) : filePath, code });
-    }
+    if (isValidFilePath(filePath) && code) results.push({ filePath, code });
   }
 
   // Pattern 2: path in bold/backtick markdown prima del blocco
-  //   **`src/main/java/Foo.java`** o `src/main/java/Foo.java`
   const mdPathRe = /(?:\*{1,2}`?|`)([\/\w.\-]+\.(?:java|kt|xml|yaml|yml|properties|json|sql|txt|gradle|kts))`?\*{0,2}\s*\n```[\w]*\n([\s\S]*?)```/g;
   const alreadyFound = new Set(results.map(r => r.filePath));
   while ((m = mdPathRe.exec(text)) !== null) {
     const filePath = m[1].trim();
     const code     = m[2].trim();
-    const abs      = projectRoot ? join(projectRoot, filePath) : filePath;
-    if (isValidFilePath(filePath) && code && !alreadyFound.has(abs)) {
-      results.push({ filePath: abs, code });
-      alreadyFound.add(abs);
+    if (isValidFilePath(filePath) && code && !alreadyFound.has(filePath)) {
+      results.push({ filePath, code });
+      alreadyFound.add(filePath);
     }
   }
 
@@ -104,18 +173,8 @@ function extractFilesFromOutput(text, projectRoot = "") {
 }
 
 function isValidFilePath(p) {
-  // Deve contenere almeno una cartella o essere un nome file noto
-  // Non deve avere spazi o essere chiaramente del testo
-  return (
-    p.length > 0 &&
-    p.length < 200 &&
-    !p.includes(" ") &&
-    /[./]/.test(p) &&
-    !/^https?:\/\//.test(p)
-  );
+  return p.length > 0 && p.length < 200 && !p.includes(" ") && /[./]/.test(p) && !/^https?:\/\//.test(p);
 }
-
-// ── Scrittura file con log ───────────────────────────────────────────────────
 
 function writeExtractedFiles(files, cwd) {
   const written = [];
@@ -125,9 +184,7 @@ function writeExtractedFiles(files, cwd) {
       mkdirSync(dirname(abs), { recursive: true });
       writeFileSync(abs, code, "utf8");
       written.push(filePath);
-    } catch (err) {
-      // ignora errori permessi / path invalidi
-    }
+    } catch { /* ignora */ }
   }
   return written;
 }
@@ -149,10 +206,7 @@ function parsePlan(text) {
   return steps;
 }
 
-// ── Scaffold Spring Boot reale (CREATE_PROJECT) ────────────────────────────
-//
-// Estrae i metadata dal task.md e crea lo scheletro fisico del progetto.
-// Strategia: prova prima con curl su start.spring.io, poi fallback pom.xml minimo.
+// ── Scaffold Spring Boot reale ───────────────────────────────────────────
 
 function parseProjectMeta(taskContent) {
   const get = (key) => {
@@ -160,47 +214,37 @@ function parseProjectMeta(taskContent) {
     return m ? m[1].trim() : null;
   };
   return {
-    artifactId:   get("artifactId")   ?? "my-app",
-    groupId:      get("groupId")      ?? "com.example",
-    pkg:          get("package")      ?? "com.example.myapp",
-    sbVersion:    get("Spring Boot version") ?? "3.3.6",
-    javaVersion:  get("Java version") ?? "21",
+    artifactId:  get("artifactId")          ?? "my-app",
+    groupId:     get("groupId")             ?? "com.example",
+    pkg:         get("package")             ?? "com.example.myapp",
+    sbVersion:   get("Spring Boot version") ?? "3.3.6",
+    javaVersion: get("Java version")        ?? "21",
   };
 }
 
 function scaffoldProject(meta, cwd) {
   const { artifactId, groupId, pkg, sbVersion, javaVersion } = meta;
   const projectDir = join(cwd, artifactId);
-
-  // Prova spring initializr via curl
-  const zipPath = join(cwd, `${artifactId}.zip`);
-  const deps = "web,validation,actuator";
-  const initUrl = `https://start.spring.io/starter.zip?type=maven-project&language=java&bootVersion=${sbVersion}&baseDir=${artifactId}&groupId=${groupId}&artifactId=${artifactId}&name=${artifactId}&packageName=${pkg}&javaVersion=${javaVersion}&dependencies=${deps}`;
+  const zipPath    = join(cwd, `${artifactId}.zip`);
+  const deps       = "web,validation,actuator";
+  const initUrl    = `https://start.spring.io/starter.zip?type=maven-project&language=java&bootVersion=${sbVersion}&baseDir=${artifactId}&groupId=${groupId}&artifactId=${artifactId}&name=${artifactId}&packageName=${pkg}&javaVersion=${javaVersion}&dependencies=${deps}`;
 
   try {
     execSync(`curl -s -L -o "${zipPath}" "${initUrl}"`, { timeout: 15000 });
     execSync(`unzip -q -o "${zipPath}" -d "${cwd}"`, { timeout: 10000 });
     execSync(`rm -f "${zipPath}"`);
     return { projectDir, method: "initializr" };
-  } catch {
-    // Fallback: crea struttura manuale con pom.xml minimo
-  }
+  } catch { /* fallback */ }
 
-  // Fallback manuale
   const pkgPath = pkg.replace(/\./g, "/");
-  const dirs = [
+  for (const d of [
     `${artifactId}/src/main/java/${pkgPath}`,
     `${artifactId}/src/main/resources`,
     `${artifactId}/src/test/java/${pkgPath}`,
-  ];
-  for (const d of dirs) mkdirSync(join(cwd, d), { recursive: true });
+  ]) mkdirSync(join(cwd, d), { recursive: true });
 
-  const mainClass = artifactId
-    .split("-")
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join("") + "Application";
+  const mainClass = artifactId.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join("") + "Application";
 
-  // pom.xml minimo
   writeFileSync(join(cwd, artifactId, "pom.xml"), `<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -215,43 +259,22 @@ function scaffoldProject(meta, cwd) {
   <groupId>${groupId}</groupId>
   <artifactId>${artifactId}</artifactId>
   <version>0.0.1-SNAPSHOT</version>
-  <properties>
-    <java.version>${javaVersion}</java.version>
-  </properties>
+  <properties><java.version>${javaVersion}</java.version></properties>
   <dependencies>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-web</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-validation</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-test</artifactId>
-      <scope>test</scope>
-    </dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-validation</artifactId></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
   </dependencies>
-  <build>
-    <plugins>
-      <plugin>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-maven-plugin</artifactId>
-      </plugin>
-    </plugins>
-  </build>
+  <build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build>
 </project>
 `, "utf8");
 
-  // Main class minima
   writeFileSync(
     join(cwd, artifactId, `src/main/java/${pkgPath}/${mainClass}.java`),
     `package ${pkg};\n\nimport org.springframework.boot.SpringApplication;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n\n@SpringBootApplication\npublic class ${mainClass} {\n    public static void main(String[] args) {\n        SpringApplication.run(${mainClass}.class, args);\n    }\n}\n`,
     "utf8"
   );
 
-  // application.properties
   writeFileSync(
     join(cwd, artifactId, "src/main/resources/application.properties"),
     `spring.application.name=${artifactId}\n`,
@@ -261,7 +284,7 @@ function scaffoldProject(meta, cwd) {
   return { projectDir, method: "manual" };
 }
 
-// ── Comando principale ────────────────────────────────────────────────────
+// ── Comando principale ──────────────────────────────────────────────────
 
 export async function task(file, opts) {
   if (!existsSync(file)) {
@@ -286,31 +309,33 @@ export async function task(file, opts) {
   const cwd      = process.cwd();
   const isCreateProject = taskName.startsWith("create-project-");
 
-  // Leggi regole progetto
-  let rulesCtx = "";
-  const rulesDir = join(cwd, ".continue", "rules");
-  if (existsSync(rulesDir)) {
-    const { readdirSync } = await import("fs");
-    for (const f of readdirSync(rulesDir)) {
-      if (f.endsWith(".md")) {
-        rulesCtx += `\n### ${f}\n${readFileSync(join(rulesDir, f), "utf8").slice(0, 800)}\n`;
-      }
-    }
+  // ── Carica regole con frontmatter parsing completo ───────────────────────────
+  const rules    = loadRules(cwd, file);
+  const javaRules = javaRulesBlock(rules);  // null se non ci sono regole Java
+
+  // Log quali regole sono attive
+  if (rules.allRules.length > 0) {
+    const labels = rules.allRules.map(r => chalk.cyan(r.file)).join(", ");
+    console.log("");
+    console.log(chalk.bold(`  ${BRAND.displayName}  v${BRAND.version}`));
+    console.log(chalk.dim(`  Regole attive: ${labels}`));
+  } else {
+    console.log("");
+    console.log(chalk.bold(`  ${BRAND.displayName}  v${BRAND.version}`));
+    console.log(chalk.dim(`  Nessuna regola trovata in .continue/rules/`));
   }
 
-  console.log("");
-  console.log(chalk.bold(`  ${BRAND.displayName}  v${BRAND.version}`));
   console.log(chalk.cyan(`\n  \uD83D\uDCCC Task: ${taskName}\n`));
 
   // ── FASE 0 (solo create-project): scaffold reale ──────────────────────────
-  let projectMeta   = null;
-  let projectDir    = null;
+  let projectMeta  = null;
+  let projectDir   = null;
   let scaffoldMethod = null;
 
   if (isCreateProject) {
     const scaffoldSpin = new Spinner("Scaffold Spring Boot da start.spring.io...").start();
     try {
-      projectMeta = parseProjectMeta(content);
+      projectMeta  = parseProjectMeta(content);
       const result = scaffoldProject(projectMeta, cwd);
       projectDir   = result.projectDir;
       scaffoldMethod = result.method;
@@ -323,8 +348,6 @@ export async function task(file, opts) {
     }
   }
 
-  const history = [];
-
   // ── FASE 1: Planning ──────────────────────────────────────────────────
   const planSpin = new Spinner("Analisi task e definizione piano...").start();
 
@@ -332,13 +355,19 @@ export async function task(file, opts) {
     ? `\n\nIl progetto è già stato creato in: ${projectMeta.artifactId}/\nPackage base: ${projectMeta.pkg}\nTutti i percorsi dei file che scrivi devono essere relativi a ${projectMeta.artifactId}/ (es: ${projectMeta.artifactId}/src/main/java/${projectMeta.pkg.replace(/\./g,"/")}/HelloController.java)`
     : "";
 
-  const planningSystemPrompt = `Sei un esperto sviluppatore Java Senior. Il tuo lavoro è implementare task software seguendo le linee guida del progetto.
+  // Blocco regole da inserire nel system prompt:
+  // - Per task Java/Spring: regole Java full-text (senza troncamento)
+  // - Per altri task: tutte le regole con limite 600 chars
+  const rulesSection = isCreateProject && javaRules
+    ? `## Linee guida Java/Spring Boot da rispettare OBBLIGATORIAMENTE:\n\n${javaRules}`
+    : `## Linee guida progetto:\n\n${buildRulesBlock(rules, 600)}`;
 
-Linee guida progetto:
-${rulesCtx || "(nessuna regola trovata — segui best practice standard)"}
+  const planningSystemPrompt = `Sei un esperto sviluppatore Java Senior. Il tuo lavoro è implementare task software seguendo RIGOROSAMENTE le linee guida del progetto.
+
+${rulesSection}
 ${projectRootHint}
 
-REGOLA FONDAMENTALE: quando scrivi codice, DEVI sempre indicare il percorso completo del file nella prima riga del blocco di codice, come commento:
+REGOLA FONDAMENTALE per i blocchi di codice: DEVI sempre indicare il percorso completo del file nella prima riga del blocco di codice, come commento:
 - Java/Kotlin: \`// percorso/del/file.java\`
 - XML:         \`<!-- percorso/del/file.xml -->\`
 - YAML/Properties: \`# percorso/del/file.yml\`
@@ -353,16 +382,11 @@ package com.example.ciaonumero;
 
 Senza il percorso nella prima riga, il file NON verrà salvato su disco.`;
 
-  const planningUserMsg = `Ecco il task da implementare:
-
---- TASK: ${taskName} ---
-${content}
---- END TASK ---
-
-Crea un piano di esecuzione numerato con tutti gli step necessari per completare il task. Sii specifico: nomina le classi, i file, i metodi da creare. Massimo 8 step.`;
-
+  const history = [];
   history.push({ role: "system", content: planningSystemPrompt });
-  history.push({ role: "user",   content: planningUserMsg });
+  history.push({ role: "user", content:
+    `Ecco il task da implementare:\n\n--- TASK: ${taskName} ---\n${content}\n--- END TASK ---\n\nCrea un piano di esecuzione numerato con tutti gli step necessari per completare il task. Sii specifico: nomina le classi, i file, i metodi da creare. Massimo 8 step.`
+  });
 
   let planText;
   try {
@@ -380,29 +404,34 @@ Crea un piano di esecuzione numerato con tutti gli step necessari per completare
 
   console.log(chalk.bold("  Piano di esecuzione:\n"));
   steps.forEach((s, i) => console.log(chalk.dim(`    ${i + 1}. ${s}`)));
+  if (javaRules) console.log(chalk.dim(`\n  \u2713 Regole Java attive nel contesto`));
   console.log("");
 
   // ── FASE 2: Esecuzione step ──────────────────────────────────────────────
-  const results   = [];
-  const logLines  = [];
+  const results    = [];
+  const logLines   = [];
   const allWritten = [];
 
   for (let i = 0; i < total; i++) {
     const stepLabel = steps[i];
     renderBar(i, total, `Step ${i + 1}: ${stepLabel}`);
 
+    // Ricorda le regole Java ad ogni step (evita che il modello le dimentichi)
+    const javaReminder = isCreateProject && javaRules
+      ? `\n\nRICORDA: devi rispettare le regole Java/Spring Boot del progetto definite nel system prompt.`
+      : "";
+
     const stepMsg = `Esegui lo step ${i + 1}: ${stepLabel}
 
 Scrivi il codice completo e funzionante per OGNI file necessario in questo step.
-Ricorda: la PRIMA RIGA di ogni blocco di codice DEVE essere il percorso del file come commento.
+La PRIMA RIGA di ogni blocco di codice DEVE essere il percorso del file come commento.
 
 Esempio:
 \`\`\`java
 // ${projectMeta?.artifactId ?? "project"}/src/main/java/${(projectMeta?.pkg ?? "com.example").replace(/\./g,"/")}/NomeClasse.java
 <codice qui>
 \`\`\`
-
-Se non scrivi il percorso nella prima riga, il file non verrà salvato.`;
+${javaReminder}`;
 
     history.push({ role: "user", content: stepMsg });
 
@@ -420,7 +449,6 @@ Se non scrivi il percorso nella prima riga, il file non verrà salvato.`;
     history.push({ role: "assistant", content: stepOutput });
     logLines.push(`## Step ${i + 1}: ${stepLabel}\n\n${stepOutput}\n`);
 
-    // Estrai e scrivi i file
     const files   = extractFilesFromOutput(stepOutput);
     const written = writeExtractedFiles(files, cwd);
     allWritten.push(...written);
@@ -457,9 +485,7 @@ Se non scrivi il percorso nella prima riga, il file non verrà salvato.`;
   results.forEach((r, i) => {
     const icon = r.ok ? chalk.green("  \u2714") : chalk.yellow("  \u26A0");
     console.log(`${icon} ${i + 1}. ${r.step}`);
-    if (r.written?.length > 0) {
-      r.written.forEach(f => console.log(chalk.dim(`       \u2514 ${f}`)));
-    }
+    if (r.written?.length > 0) r.written.forEach(f => console.log(chalk.dim(`       \u2514 ${f}`)));
   });
   console.log("");
 
@@ -468,7 +494,7 @@ Se non scrivi il percorso nella prima riga, il file non verrà salvato.`;
     allWritten.forEach(f => console.log(chalk.dim(`     ${f}`)));
     console.log("");
   } else {
-    console.log(chalk.yellow("  \u26A0  Nessun file estratto. Controlla .continue/agent.log per il codice generato.\n"));
+    console.log(chalk.yellow(`  \u26A0  Nessun file estratto. Controlla .continue/agent.log per il codice generato.\n`));
   }
 
   if (isCreateProject && projectMeta) {
@@ -480,8 +506,11 @@ Se non scrivi il percorso nella prima riga, il file non verrà salvato.`;
   if (logLines.length > 0) {
     const logDir  = join(cwd, ".continue");
     mkdirSync(logDir, { recursive: true });
-    const logPath = join(logDir, "agent.log");
-    writeFileSync(logPath, `# Task: ${taskName}\n> ${new Date().toISOString()}\n\n` + logLines.join("\n---\n\n"), "utf8");
+    writeFileSync(
+      join(logDir, "agent.log"),
+      `# Task: ${taskName}\n> ${new Date().toISOString()}\n\n## Regole attive\n${rules.allRules.map(r=>r.file).join(", ") || "nessuna"}\n\n` + logLines.join("\n---\n\n"),
+      "utf8"
+    );
     console.log(chalk.dim(`  Log salvato in .continue/agent.log\n`));
   }
 
