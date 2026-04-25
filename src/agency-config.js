@@ -76,9 +76,26 @@ export function syncInternalConfig() {
   if (base.endsWith("/v1")) base = base.slice(0, -3);
   const apiBase = base + "/v1";
 
+  // Continue richiede name e version obbligatoriamente al top level
   const internalConfig = {
-    models: [{ name: "agency-model", provider: "openai", apiBase, apiKey: key, model }],
-    tabAutocompleteModel: { name: "agency-autocomplete", provider: "openai", apiBase, apiKey: key, model },
+    name: BRAND.displayName,
+    version: "1",
+    models: [
+      {
+        name: "agency-model",
+        provider: "openai",
+        apiBase,
+        apiKey: key,
+        model,
+      },
+    ],
+    tabAutocompleteModel: {
+      name: "agency-autocomplete",
+      provider: "openai",
+      apiBase,
+      apiKey: key,
+      model,
+    },
   };
 
   writeFileSync(CN_CONFIG_PATH, yaml.dump(internalConfig, { indent: 2 }), "utf8");
