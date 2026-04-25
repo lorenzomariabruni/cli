@@ -118,7 +118,6 @@ Implementa un UserService Spring Boot completo.
 
 ## Vincoli tecnici
 - Segui 01-java-guidelines.md
-- Segui 02-angular-guidelines.md (se frontend)
 - Iniezione via costruttore obbligatoria
 
 ## Test richiesti
@@ -139,6 +138,114 @@ L'agente:
 4. Scrive i file di codice direttamente nel progetto
 5. Salva il log in `.continue/agent.log`
 6. Archivia il task in `tasks/.processed/`
+
+---
+
+## Crea un nuovo progetto Spring Boot da zero
+
+La regola `05-create-project` è **sealed** (cablata nel binario) e si attiva
+automaticamente quando il task file segue il pattern `tasks/create-project*.md`.
+
+### Come usarla
+
+**1. Entra nella cartella dove vuoi creare il progetto** (può essere vuota o una
+cartella workspace già esistente):
+
+```bash
+cd ~/progetti
+```
+
+**2. Inizializza agency nella cartella corrente:**
+
+```bash
+agency init
+```
+
+**3. Crea il file task** in `tasks/create-project-<nome>.md`:
+
+```markdown
+# tasks/create-project-ecommerce.md
+
+## Project info
+- artifactId: ecommerce-service
+- groupId: com.mycompany
+- package: com.mycompany.ecommerce
+- Spring Boot version: 3.3.6
+- Java version: 21
+
+## Features richieste
+- Gestione prodotti: CRUD su entità Product (id, name, price, stock)
+- Endpoint REST su /api/products
+- Validazione input con Bean Validation
+- JPA + H2 per sviluppo locale
+
+## Test da eseguire
+- ProductServiceImplTest: unit test con Mockito
+- ProductControllerTest: @WebMvcTest slice test
+- EcommerceApplicationTests: context load
+```
+
+**4. Lancia il task:**
+
+```bash
+agency task tasks/create-project-ecommerce.md
+```
+
+L'agente eseguirà automaticamente questi step:
+
+```
+  📌 Task: create-project-ecommerce.md  [regola: 05-create-project • sealed]
+
+  Piano:
+    1. Leggi il task e rileva le configurazioni
+    2. Crea struttura Maven in ecommerce-service/
+    3. Genera pom.xml con le dipendenze richieste
+    4. Genera entry point EcommerceServiceApplication.java
+    5. Genera model Product + DTO + validazioni
+    6. Genera ProductRepository + ProductService + ProductServiceImpl
+    7. Genera ProductController con endpoint REST
+    8. Genera GlobalExceptionHandler (@ControllerAdvice)
+    9. Genera test unitari ProductServiceImplTest
+   10. Genera test slice ProductControllerTest
+   11. Genera EcommerceApplicationTests
+   12. Esegui: mvn test -q
+
+  [████████████████████████████]  100% (12/12)
+
+  ✔ mvn test — BUILD SUCCESS  (7 test passed, 0 failed)
+
+  | File creato                                      | Tipo         |
+  |--------------------------------------------------|---------------|
+  | ecommerce-service/pom.xml                        | Maven config  |
+  | .../EcommerceServiceApplication.java             | Entry point   |
+  | .../model/Product.java                           | Entity/Model  |
+  | .../dto/ProductDto.java                          | DTO           |
+  | .../repository/ProductRepository.java            | Repository    |
+  | .../service/ProductService.java                  | Interface     |
+  | .../service/ProductServiceImpl.java              | Service       |
+  | .../controller/ProductController.java            | REST endpoint |
+  | .../exception/ProductNotFoundException.java      | Exception     |
+  | .../exception/GlobalExceptionHandler.java        | Advice        |
+  | .../test/.../ProductServiceImplTest.java         | Unit test     |
+  | .../test/.../ProductControllerTest.java          | Slice test    |
+  | .../test/.../EcommerceApplicationTests.java      | Context test  |
+
+  🚀 Avvia il progetto:
+     cd ecommerce-service && mvn spring-boot:run
+```
+
+### Nomi file task validi per questa regola
+
+| Pattern file | Attiva la regola? |
+|---|---|
+| `tasks/create-project-ecommerce.md` | ✔ sì |
+| `tasks/create-project-auth.md` | ✔ sì |
+| `tasks/new-project-orders.md` | ✔ sì |
+| `tasks/init-project-gateway.md` | ✔ sì |
+| `tasks/user-service.md` | ✘ no (usa 04-task-runner) |
+
+> La regola **05-create-project** è sealed: viene scritta in `.continue/rules/`
+> ad ogni `agency init` e non può essere sovrascritta o eliminata manualmente.
 
 ---
 
@@ -183,6 +290,7 @@ Le regole si trovano in `.continue/rules/` e vengono caricate automaticamente da
 | `02-angular-guidelines.md` | sealed | Best practice Angular 17+: standalone, signals, OnPush, Jest |
 | `03-security.md` | sealed | Regole di sicurezza cross-cutting |
 | `04-task-runner.md` | modificabile | Processo di esecuzione dei task |
+| `05-create-project.md` | sealed | Crea un progetto Spring Boot da zero + esegue JUnit |
 
 > Le regole **sealed** sono incorporate nel binario e non possono essere modificate. Riesegui `agency init` per rigenerarle.
 
@@ -195,7 +303,7 @@ agency rules new
 Wizard interattivo:
 
 ```
-  ✦ Nuova regola
+  ❖ Nuova regola
 
   Nome della regola: Angular Feature Rules
   Descrizione breve: Regole per nuovi componenti Angular in src/app/features
@@ -208,13 +316,13 @@ Wizard interattivo:
   - Signals per lo stato locale, non BehaviorSubject
   ---
 
-  ✓ Regola creata: .continue/rules/05-angular-feature-rules.md
+  ✓ Regola creata: .continue/rules/06-angular-feature-rules.md
 ```
 
 In alternativa, crea il file manualmente:
 
 ```bash
-cat > .continue/rules/05-my-rule.md << 'EOF'
+cat > .continue/rules/06-my-rule.md << 'EOF'
 ---
 name: My Rule
 globs: ["src/**/*.ts"]
@@ -238,12 +346,13 @@ agency rules list
 ```
   Regole attive in .continue/rules/
 
-  ✦ 00-project-overview.md       [always]
-  ✦ 01-java-guidelines.md        [always]  [sealed]
-  ✦ 02-angular-guidelines.md     [always]  [sealed]
-  ✦ 03-security.md               [always]  [sealed]
-  ✦ 04-task-runner.md            [glob: tasks/**/*.md]
-  ✦ 05-angular-feature-rules.md  [glob: src/app/features/**/*.ts]
+  ❖ 00-project-overview.md       [always]
+  ❖ 01-java-guidelines.md        [always]  [sealed]
+  ❖ 02-angular-guidelines.md     [always]  [sealed]
+  ❖ 03-security.md               [always]  [sealed]
+  ❖ 04-task-runner.md            [glob: tasks/**/*.md]
+  ❖ 05-create-project.md         [glob: tasks/create-project*.md]  [sealed]
+  ❖ 06-angular-feature-rules.md  [glob: src/app/features/**/*.ts]
 ```
 
 ---
@@ -261,11 +370,13 @@ mio-progetto/
 │   │   ├── 02-angular-guidelines.md ← sealed
 │   │   ├── 03-security.md           ← sealed
 │   │   ├── 04-task-runner.md        ← modificabile
-│   │   └── 05-my-custom-rule.md     ← tue regole custom
+│   │   ├── 05-create-project.md     ← sealed
+│   │   └── 06-my-custom-rule.md     ← tue regole custom
 │   ├── agent.log                    ← log dell'ultima sessione task
 │   └── mcpServers/                  ← config server MCP
 └── tasks/
-    ├── user-service.md              ← task da implementare
+    ├── create-project-ecommerce.md  ← crea un progetto da zero
+    ├── user-service.md              ← task di implementazione
     └── .processed/                  ← task completati
 ```
 
