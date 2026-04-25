@@ -5,22 +5,10 @@ import chalk from "chalk";
 import { readConfig, syncInternalConfig, isConfigured } from "../agency-config.js";
 import BRAND from "../brand.js";
 
-// ── Progress bar ──────────────────────────────────────────────────────────────
-
-const BAR_WIDTH = 28;
-
-function renderBar(current, total, label = "") {
-  const pct    = total > 0 ? Math.min(current / total, 1) : 0;
-  const filled = Math.round(pct * BAR_WIDTH);
-  const bar    = chalk.cyan("█".repeat(filled)) + chalk.dim("░".repeat(BAR_WIDTH - filled));
-  const pctStr = String(Math.round(pct * 100)).padStart(3, " ") + "%";
-  const step   = total > 0 ? chalk.dim(` (${current}/${total})`) : "";
-  const lbl    = label ? " " + chalk.white(label.slice(0, 38).padEnd(38)) : "";
-  process.stdout.write(`\r  [${bar}] ${pctStr}${step}${lbl}`);
-}
+// ── Helpers terminale ──────────────────────────────────────────────────────────────
 
 function clearLine() {
-  process.stdout.write("\r" + " ".repeat(process.stdout.columns ?? 100) + "\r");
+  process.stdout.write("\r" + " ".repeat(process.stdout.columns ?? 120) + "\r");
 }
 
 class Spinner {
@@ -36,14 +24,70 @@ class Spinner {
 
 // ── API helpers ──────────────────────────────────────────────────────────────
 
-async function callAPI(apiBase, apiKey, model, messages) {
+/**
+ * Streaming nascosto: accumula il testo completo senza stampare nulla.
+ * Usato per il planning dove poi stampiamo il risultato formattato.
+ */
+async function streamToString(apiBase, apiKey, model, messages) {
   const res = await fetch(`${apiBase}/chat/completions`, {
     method:  "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-    body:    JSON.stringify({ model, messages, stream: false }),
+    body:    JSON.stringify({ model, messages, stream: true }),
   });
   if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
-  return (await res.json()).choices?.[0]?.message?.content ?? "";
+  const reader  = res.body.getReader();
+  const decoder = new TextDecoder();
+  let full = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    for (const line of decoder.decode(value, { stream: true }).split("\n")) {
+      if (!line.startsWith("data: ")) continue;
+      const raw = line.slice(6).trim();
+      if (raw === "[DONE]") break;
+      try {
+        const delta = JSON.parse(raw).choices?.[0]?.delta?.content ?? "";
+        if (delta) full += delta;
+      } catch { /* chunk malformato */ }
+    }
+  }
+  return full;
+}
+
+/**
+ * Streaming visibile: stampa ogni token in tempo reale con prefisso.
+ * Ritorna il testo completo.
+ */
+async function streamToScreen(apiBase, apiKey, model, messages, prefix = "  ") {
+  const res = await fetch(`${apiBase}/chat/completions`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+    body:    JSON.stringify({ model, messages, stream: true }),
+  });
+  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+  const reader  = res.body.getReader();
+  const decoder = new TextDecoder();
+  let full = "";
+  process.stdout.write(prefix);
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    for (const line of decoder.decode(value, { stream: true }).split("\n")) {
+      if (!line.startsWith("data: ")) continue;
+      const raw = line.slice(6).trim();
+      if (raw === "[DONE]") break;
+      try {
+        const delta = JSON.parse(raw).choices?.[0]?.delta?.content ?? "";
+        if (delta) {
+          // Ogni newline viene indentata col prefisso
+          process.stdout.write(delta.replace(/\n/g, `\n${prefix}`));
+          full += delta;
+        }
+      } catch { /* chunk malformato */ }
+    }
+  }
+  process.stdout.write("\n");
+  return full;
 }
 
 // ── Rules loader ──────────────────────────────────────────────────────────────
@@ -205,7 +249,6 @@ function parseProjectMeta(taskContent) {
   };
 }
 
-// Verifica che il file sia uno zip valido (magic bytes: PK\x03\x04)
 function isValidZip(filePath) {
   try {
     const buf = Buffer.alloc(4);
@@ -278,7 +321,6 @@ function scaffoldProject(meta, cwd) {
   const { artifactId, groupId, pkg, sbVersion, javaVersion } = meta;
   const zipPath = join(cwd, `${artifactId}.zip`);
   const deps    = "web,validation,actuator";
-  // start.spring.io richiede il bootVersion senza patch se è .RELEASE, altrimenti stringa esatta
   const initUrl = [
     `https://start.spring.io/starter.zip`,
     `?type=maven-project`,
@@ -294,28 +336,40 @@ function scaffoldProject(meta, cwd) {
   ].join("");
 
   try {
-    // Scarica con -f (fail on HTTP error) e user-agent per evitare blocchi
     execSync(
       `curl -f -s -L --max-time 20 -A "agency-cli/1.0" -o "${zipPath}" "${initUrl}"`,
       { timeout: 25000 }
     );
-
-    // Verifica magic bytes PK prima di chiamare unzip
     if (!isValidZip(zipPath)) {
       try { execSync(`rm -f "${zipPath}"`); } catch {}
-      throw new Error("Il file scaricato non è uno zip valido (start.spring.io ha risposto con errore)");
+      throw new Error("Il file scaricato non è uno zip valido");
     }
-
     execSync(`unzip -q -o "${zipPath}" -d "${cwd}"`, { timeout: 15000 });
     execSync(`rm -f "${zipPath}"`);
     return { projectDir: join(cwd, artifactId), method: "initializr" };
-
   } catch (err) {
-    // Cleanup zip parziale
     try { execSync(`rm -f "${zipPath}"`); } catch {}
-    // Fallback: crea struttura manualmente
     return scaffoldManual(meta, cwd);
   }
+}
+
+// ── Box di intestazione step ──────────────────────────────────────────────────
+
+function printStepHeader(stepNum, total, label) {
+  const cols  = Math.min(process.stdout.columns ?? 80, 80);
+  const title = `  Step ${stepNum}/${total}: ${label}`;
+  const line  = "─".repeat(cols - 2);
+  console.log("");
+  console.log(chalk.cyan(`  ┌${line}┐`));
+  console.log(chalk.cyan(`  │`) + chalk.bold.white(` ▶ ${title.padEnd(cols - 4)} `) + chalk.cyan(`│`));
+  console.log(chalk.cyan(`  └${line}┘`));
+  console.log("");
+}
+
+function printStepFooter(written) {
+  if (written.length === 0) return;
+  console.log("");
+  written.forEach(f => console.log(chalk.green(`  └ ✔ `) + chalk.dim(f)));
 }
 
 // ── Comando principale ──────────────────────────────────────────────────
@@ -349,7 +403,7 @@ export async function task(file, opts) {
   console.log("");
   console.log(chalk.bold(`  ${BRAND.displayName}  v${BRAND.version}`));
   if (rules.allRules.length > 0) {
-    console.log(chalk.dim(`  Regole attive: ${rules.allRules.map(r => chalk.cyan(r.file)).join(", ")}` ));
+    console.log(chalk.dim(`  Regole attive: ${rules.allRules.map(r => chalk.cyan(r.file)).join(", ")}`) );
   } else {
     console.log(chalk.dim(`  Nessuna regola trovata in .continue/rules/`));
   }
@@ -363,9 +417,9 @@ export async function task(file, opts) {
   if (isCreateProject) {
     const scaffoldSpin = new Spinner("Scaffold Spring Boot...").start();
     try {
-      projectMeta  = parseProjectMeta(content);
-      const result = scaffoldProject(projectMeta, cwd);
-      projectDir   = result.projectDir;
+      projectMeta    = parseProjectMeta(content);
+      const result   = scaffoldProject(projectMeta, cwd);
+      projectDir     = result.projectDir;
       scaffoldMethod = result.method;
       scaffoldSpin.stop(
         chalk.green(`  \u2714 Scaffold: ${projectMeta.artifactId}/`) +
@@ -376,8 +430,13 @@ export async function task(file, opts) {
     }
   }
 
-  // ── FASE 1: Planning ──────────────────────────────────────────────────
-  const planSpin = new Spinner("Analisi task e definizione piano...").start();
+  // ── FASE 1: Planning (streaming nascosto, poi stampa formattata) ──────────
+  const cols = Math.min(process.stdout.columns ?? 80, 80);
+  const line = "─".repeat(cols - 2);
+  console.log(chalk.bold.cyan(`  ┌${line}┐`));
+  console.log(chalk.bold.cyan(`  │`) + chalk.bold.white("  🗺\uFE0F  Fase 1 — Analisi & Piano di esecuzione".padEnd(cols - 2)) + chalk.bold.cyan(`│`));
+  console.log(chalk.bold.cyan(`  └${line}┘`));
+  console.log("");
 
   const projectRootHint = projectDir && projectMeta
     ? `\n\nIl progetto è già stato creato in: ${projectMeta.artifactId}/\nPackage base: ${projectMeta.pkg}\nTutti i percorsi dei file che scrivi devono essere relativi a ${projectMeta.artifactId}/ (es: ${projectMeta.artifactId}/src/main/java/${projectMeta.pkg.replace(/\./g,"/")}/HelloController.java)`
@@ -415,30 +474,34 @@ Senza il percorso nella prima riga, il file NON verrà salvato su disco.`;
 
   let planText;
   try {
-    planText = await callAPI(apiBase, apiKey, model, history);
+    // Streaming nascosto per il planning: accumuliamo il testo
+    // e lo stampiamo formattato dopo (per poter estrarre gli step)
+    const planSpin = new Spinner("L'LLM sta elaborando il piano...").start();
+    planText = await streamToString(apiBase, apiKey, model, history);
+    planSpin.stop();
   } catch (err) {
-    planSpin.stop(chalk.red(`  Errore nella fase di planning: ${err.message}`));
+    console.log(chalk.red(`  Errore nella fase di planning: ${err.message}`));
     process.exit(1);
   }
   history.push({ role: "assistant", content: planText });
-  planSpin.stop();
 
   const steps = parsePlan(planText);
-  const total  = steps.length;
+  const total = steps.length;
 
-  console.log(chalk.bold("  Piano di esecuzione:\n"));
-  steps.forEach((s, i) => console.log(chalk.dim(`    ${i + 1}. ${s}`)));
-  if (javaRules) console.log(chalk.dim(`\n  \u2713 Regole Java attive nel contesto`));
-  console.log("");
+  console.log(chalk.bold("  Piano:\n"));
+  steps.forEach((s, i) => console.log(chalk.dim(`    ${chalk.cyan(i + 1 + ".")} ${s}`)));
+  if (javaRules) console.log(chalk.dim(`\n  ✓ Regole Java attive nel contesto`));
 
-  // ── FASE 2: Esecuzione step ──────────────────────────────────────────────
+  // ── FASE 2: Esecuzione step (streaming visibile per ogni step) ─────────
   const results    = [];
   const logLines   = [];
   const allWritten = [];
 
   for (let i = 0; i < total; i++) {
     const stepLabel = steps[i];
-    renderBar(i, total, `Step ${i + 1}: ${stepLabel}`);
+
+    // Header box per lo step corrente
+    printStepHeader(i + 1, total, stepLabel);
 
     const javaReminder = isCreateProject && javaRules
       ? `\n\nRICORDA: devi rispettare le regole Java/Spring Boot definite nel system prompt.`
@@ -461,10 +524,10 @@ ${javaReminder}`;
 
     let stepOutput = "";
     try {
-      stepOutput = await callAPI(apiBase, apiKey, model, history);
+      // ▶ OUTPUT IN TEMPO REALE — ogni token viene stampato subito
+      stepOutput = await streamToScreen(apiBase, apiKey, model, history, "  ");
     } catch (err) {
-      clearLine();
-      console.log(chalk.yellow(`  \u26A0  Step ${i + 1} fallito: ${err.message}`));
+      console.log(chalk.yellow(`\n  ⚠  Step ${i + 1} fallito: ${err.message}`));
       history.push({ role: "assistant", content: `(step fallito: ${err.message})` });
       results.push({ step: stepLabel, ok: false, error: err.message, written: [] });
       continue;
@@ -477,25 +540,34 @@ ${javaReminder}`;
     const written = writeExtractedFiles(files, cwd);
     allWritten.push(...written);
 
+    printStepFooter(written);
     results.push({ step: stepLabel, ok: true, written });
-    renderBar(i + 1, total, i + 1 === total ? "Completato!" : `Step ${i + 2}: ${steps[i + 1] ?? ""}`);
-    await new Promise(r => setTimeout(r, 200));
   }
-
-  clearLine();
 
   // ── FASE 3: mvn test ────────────────────────────────────────────────────
   if (isCreateProject && projectDir && existsSync(join(projectDir, "pom.xml"))) {
-    const testSpin = new Spinner(`mvn test -f ${projectMeta.artifactId}/pom.xml ...`).start();
+    console.log("");
+    console.log(chalk.bold.cyan(`  ┌${line}┐`));
+    console.log(chalk.bold.cyan(`  │`) + chalk.bold.white("  ⚙️  Fase 3 — mvn test".padEnd(cols - 2)) + chalk.bold.cyan(`│`));
+    console.log(chalk.bold.cyan(`  └${line}┘`));
+    console.log("");
     try {
-      const out = execSync(`cd "${projectDir}" && mvn test -q 2>&1`, { timeout: 120000 }).toString();
-      testSpin.stop(chalk.green(`  \u2714 mvn test — BUILD SUCCESS\n`));
-      logLines.push(`## mvn test\n\n\`\`\`\n${out}\n\`\`\`\n`);
+      // spawn per vedere l'output Maven in tempo reale
+      const { spawnSync } = await import("child_process");
+      const mvn = spawnSync("mvn", ["test"], {
+        cwd:     projectDir,
+        stdio:   "inherit",
+        timeout: 120000,
+      });
+      if (mvn.status === 0) {
+        console.log(chalk.green(`\n  ✔ mvn test — BUILD SUCCESS\n`));
+        logLines.push(`## mvn test\nBUILD SUCCESS\n`);
+      } else {
+        console.log(chalk.yellow(`\n  ⚠  mvn test — BUILD FAILED\n`));
+        logLines.push(`## mvn test\nBUILD FAILED\n`);
+      }
     } catch (err) {
-      const errOut = (err.stdout?.toString() ?? "") + (err.stderr?.toString() ?? "") || err.message;
-      testSpin.stop(chalk.yellow(`  \u26A0  mvn test fallito\n`));
-      console.log(chalk.dim(errOut.split("\n").slice(-20).map(l => `  ${l}`).join("\n")));
-      logLines.push(`## mvn test (FAILED)\n\n\`\`\`\n${errOut}\n\`\`\`\n`);
+      console.log(chalk.yellow(`  ⚠  mvn test: ${err.message}\n`));
     }
   }
 
@@ -503,13 +575,17 @@ ${javaReminder}`;
   const ok     = results.filter(r => r.ok).length;
   const failed = results.filter(r => !r.ok).length;
 
-  console.log(chalk.bold.green("  \u2714 Task completato!\n"));
+  console.log("");
+  console.log(chalk.bold.cyan(`  ┌${line}┐`));
+  console.log(chalk.bold.cyan(`  │`) + chalk.bold.white("  ✔  Riepilogo".padEnd(cols - 2)) + chalk.bold.cyan(`│`));
+  console.log(chalk.bold.cyan(`  └${line}┘`));
+  console.log("");
   console.log(`  ${chalk.green(ok + " step completati")}${failed ? "  " + chalk.yellow(failed + " falliti") : ""}\n`);
 
   results.forEach((r, i) => {
-    const icon = r.ok ? chalk.green("  \u2714") : chalk.yellow("  \u26A0");
+    const icon = r.ok ? chalk.green("  ✔") : chalk.yellow("  ⚠");
     console.log(`${icon} ${i + 1}. ${r.step}`);
-    if (r.written?.length > 0) r.written.forEach(f => console.log(chalk.dim(`       \u2514 ${f}`)));
+    if (r.written?.length > 0) r.written.forEach(f => console.log(chalk.dim(`       └ ${f}`)));
   });
   console.log("");
 
@@ -518,7 +594,7 @@ ${javaReminder}`;
     allWritten.forEach(f => console.log(chalk.dim(`     ${f}`)));
     console.log("");
   } else {
-    console.log(chalk.yellow(`  \u26A0  Nessun file estratto. Controlla .continue/agent.log per il codice generato.\n`));
+    console.log(chalk.yellow(`  ⚠  Nessun file estratto. Controlla .continue/agent.log per il codice generato.\n`));
   }
 
   if (isCreateProject && projectMeta) {
