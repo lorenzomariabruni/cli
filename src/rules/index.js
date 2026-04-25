@@ -211,6 +211,187 @@ When a file from the tasks/ folder is provided:
 Work autonomously without asking for confirmation on every file.
 `,
   },
+
+  "05-create-project.md": {
+    sealed: true,
+    content: `---
+name: Create Project
+globs: ["tasks/create-project*.md", "tasks/new-project*.md", "tasks/init-project*.md"]
+alwaysApply: false
+description: >
+  Regola sealed per la creazione di un progetto Spring Boot funzionante da zero.
+  Si attiva quando il task file segue il pattern tasks/create-project*.md.
+  Genera struttura Maven, dipendenze, codice e JUnit, poi esegue i test.
+---
+
+# Create Project — Spring Boot Starter
+
+## Goal
+Generate a **fully working** Spring Boot project from scratch inside the current
+directory. The project must compile, pass all JUnit tests, and be ready to run
+with \`mvn spring-boot:run\`.
+
+## Step-by-step process (execute in order, no skipping)
+
+### 1. Read the task file
+- Extract: \`artifactId\`, \`groupId\`, \`package\`, \`Spring Boot version\` (default 3.3.x),
+  \`Java version\` (default 21), list of required features/modules.
+- If a field is missing, use sensible defaults — do NOT ask.
+
+### 2. Create Maven project structure
+Create every directory and file listed below. Use the \`groupId\`/\`artifactId\`
+from the task to build the package path.
+
+\`\`\`
+<artifactId>/
+├── pom.xml
+└── src/
+    ├── main/
+    │   ├── java/<package>/
+    │   │   ├── <ArtifactId>Application.java
+    │   │   ├── config/
+    │   │   ├── controller/
+    │   │   ├── service/
+    │   │   ├── repository/
+    │   │   ├── model/
+    │   │   └── exception/
+    │   └── resources/
+    │       ├── application.yml
+    │       └── application-test.yml
+    └── test/
+        └── java/<package>/
+            ├── <ArtifactId>ApplicationTests.java
+            ├── controller/
+            └── service/
+\`\`\`
+
+### 3. Generate pom.xml
+- Parent: \`spring-boot-starter-parent\` at the version from the task
+- Always include:
+  - \`spring-boot-starter-web\`
+  - \`spring-boot-starter-validation\`
+  - \`spring-boot-starter-test\` (scope test) — includes JUnit 5 + Mockito
+  - \`spring-boot-starter-actuator\`
+- Add optional starters only if explicitly requested in the task:
+  \`spring-boot-starter-data-jpa\`, \`spring-boot-starter-security\`,
+  \`spring-boot-starter-data-redis\`, \`lombok\`, etc.
+- For JPA: default in-memory DB is **H2** (scope test + runtime for dev profile)
+- Java version: use \`<java.version>\` property
+
+### 4. Generate application entry point
+\`\`\`java
+@SpringBootApplication
+public class <ArtifactId>Application {
+    public static void main(String[] args) {
+        SpringApplication.run(<ArtifactId>Application.class, args);
+    }
+}
+// created with rule create-project
+\`\`\`
+
+### 5. Generate at least ONE complete feature
+Implement a minimal but **real** REST feature based on the task description.
+If no feature is specified, generate a \`/health/info\` endpoint that returns
+project name + version from \`application.yml\`.
+
+Each feature must include:
+- **Model/Entity** — plain POJO or @Entity (if JPA requested)
+- **DTO** — with Bean Validation annotations
+- **Service interface + Impl** — with \`@Service\`, constructor injection
+- **Controller** — with \`@RestController\`, \`@RequestMapping\`, typed responses
+- **Exception** — custom \`RuntimeException\` + \`@ControllerAdvice\` handler
+- All Java files end with \`// created with rule create-project\`
+
+### 6. Generate JUnit tests (MANDATORY)
+For every class generated in step 5, create the corresponding test:
+
+**Service test (unit)**
+\`\`\`java
+@ExtendWith(MockitoExtension.class)
+class <Feature>ServiceImplTest {
+    @Mock  <Dependency>Repository repository;
+    @InjectMocks <Feature>ServiceImpl service;
+
+    @Test
+    void methodName_validInput_returnsExpected() { ... }
+
+    @Test
+    void methodName_notFound_throwsException() { ... }
+}
+// created with rule create-project
+\`\`\`
+
+**Controller test (slice)**
+\`\`\`java
+@WebMvcTest(<Feature>Controller.class)
+class <Feature>ControllerTest {
+    @Autowired MockMvc mockMvc;
+    @MockBean  <Feature>Service service;
+
+    @Test
+    void endpoint_validRequest_returns200() throws Exception { ... }
+
+    @Test
+    void endpoint_invalidRequest_returns400() throws Exception { ... }
+}
+// created with rule create-project
+\`\`\`
+
+**Application context test**
+\`\`\`java
+@SpringBootTest
+class <ArtifactId>ApplicationTests {
+    @Test
+    void contextLoads() {}
+}
+// created with rule create-project
+\`\`\`
+
+### 7. application.yml
+\`\`\`yaml
+spring:
+  application:
+    name: <artifactId>
+  profiles:
+    active: dev
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+\`\`\`
+
+### 8. Run JUnit tests
+After generating all files, execute:
+\`\`\`bash
+cd <artifactId> && mvn test -q
+\`\`\`
+
+- If tests **pass** → print summary and exit successfully
+- If tests **fail** → read the error output, fix the root cause, re-run \`mvn test -q\`
+- Repeat fix-and-run cycle up to **3 times** before reporting the error to the user
+
+### 9. Final summary
+Print a table with:
+- Files created (path + type)
+- Test results (passed / failed / skipped)
+- Command to start the app: \`cd <artifactId> && mvn spring-boot:run\`
+
+## Rules that always apply alongside this one
+- **01-java-guidelines.md** — naming, structure, error handling, security
+- **03-security.md** — no hardcoded secrets, no sensitive logging
+
+## Non-negotiable constraints
+- Every generated Java file must end with \`// created with rule create-project\`
+- Zero hardcoded secrets — use \`application.yml\` placeholders or env vars
+- Zero compilation errors before reporting completion
+- All JUnit tests must pass before reporting completion
+`,
+  },
 };
 
 export default RULES;
