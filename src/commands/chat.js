@@ -1,11 +1,32 @@
 import chalk from "chalk";
 import readline from "readline";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "fs";
-import { join, basename } from "path";
+import { join } from "path";
 import { readConfig, syncInternalConfig, isConfigured } from "../agency-config.js";
 import { roleSystemPrompt } from "../roles.js";
 import { task } from "./task.js";
 import BRAND from "../brand.js";
+
+// ── Spinner ──────────────────────────────────────────────────────────────
+//
+// Restituisce uno stop() da chiamare al termine.
+// Mostra un cursore animato + messaggio sulla stessa riga.
+
+function spinner(label) {
+  const frames = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"];
+  let i = 0;
+  const id = setInterval(() => {
+    process.stdout.write(`\r  ${chalk.cyan(frames[i++ % frames.length])} ${chalk.dim(label)}`);
+  }, 80);
+  return {
+    update(msg) { clearInterval(id); process.stdout.write(`\r  ${chalk.cyan(frames[i % frames.length])} ${chalk.dim(msg)}`); },
+    stop(msg = "") {
+      clearInterval(id);
+      process.stdout.write("\r" + " ".repeat(60) + "\r");
+      if (msg) process.stdout.write(msg + "\n");
+    },
+  };
+}
 
 // ── API helpers ─────────────────────────────────────────────────────────
 
@@ -19,6 +40,39 @@ async function callAPI(apiBase, apiKey, model, messages) {
   return (await res.json()).choices?.[0]?.message?.content ?? "";
 }
 
+// Streaming visibile a schermo — ritorna il testo completo
+async function streamAPIvisible(apiBase, apiKey, model, messages, prefix = "  ") {
+  const res = await fetch(`${apiBase}/chat/completions`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+    body:    JSON.stringify({ model, messages, stream: true }),
+  });
+  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+  const reader  = res.body.getReader();
+  const decoder = new TextDecoder();
+  let full = "";
+  process.stdout.write(prefix);
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    for (const line of decoder.decode(value, { stream: true }).split("\n")) {
+      if (!line.startsWith("data: ")) continue;
+      const raw = line.slice(6).trim();
+      if (raw === "[DONE]") break;
+      try {
+        const delta = JSON.parse(raw).choices?.[0]?.delta?.content ?? "";
+        if (delta) {
+          process.stdout.write(chalk.dim(delta.replace(/\n/g, `\n${prefix}`)));
+          full += delta;
+        }
+      } catch { /* chunk malformato */ }
+    }
+  }
+  process.stdout.write("\n");
+  return full;
+}
+
+// Streaming normale per la chat (testo colorato, non dim)
 async function streamAPI(apiBase, apiKey, model, messages) {
   const res = await fetch(`${apiBase}/chat/completions`, {
     method:  "POST",
@@ -48,15 +102,6 @@ async function streamAPI(apiBase, apiKey, model, messages) {
 }
 
 // ── Intent detection ───────────────────────────────────────────────────
-//
-// Tre intent possibili:
-//   CREATE_PROJECT — vuole creare un nuovo progetto Spring Boot da zero
-//   IMPLEMENT      — vuole implementare codice in un progetto esistente
-//   CHAT           — domanda, spiegazione, debug, review, tutto il resto
-//
-// La distinzione tra CREATE_PROJECT e IMPLEMENT è fondamentale:
-//   CREATE_PROJECT = progetto nuovo, da zero, starter, scaffolding
-//   IMPLEMENT      = aggiungere/modificare codice in un progetto esistente
 
 const INTENT_SYSTEM = `You are an intent classifier for a developer CLI assistant.
 Classify the user message as exactly one of:
@@ -87,7 +132,7 @@ async function detectIntent(apiBase, apiKey, model, userMessage) {
     if (upper.includes("IMPLEMENT"))      return "IMPLEMENT";
     return "CHAT";
   } catch {
-    return "CHAT"; // fallback sicuro
+    return "CHAT";
   }
 }
 
@@ -105,9 +150,9 @@ function loadRulesContext(cwd) {
   return ctx;
 }
 
-// ── Task generation — IMPLEMENT ────────────────────────────────────────
+// ── Task generation — IMPLEMENT (con streaming live) ───────────────────
 
-async function generateTaskFile(apiBase, apiKey, model, userMessage, rulesCtx, cwd) {
+async function generateTaskFileStreamed(apiBase, apiKey, model, userMessage, rulesCtx, cwd) {
   const taskSystemPrompt = `You are an expert software architect. Given a feature request and project guidelines, generate a detailed task.md file.
 
 Project guidelines available:
@@ -122,7 +167,7 @@ The task.md must include:
 
 Be very specific: name every class, method, field, and file. Output ONLY the markdown content, no explanations.`;
 
-  const taskContent = await callAPI(apiBase, apiKey, model, [
+  const taskContent = await streamAPIvisible(apiBase, apiKey, model, [
     { role: "system", content: taskSystemPrompt },
     { role: "user",   content: `Feature request: ${userMessage}` },
   ]);
@@ -142,13 +187,9 @@ Be very specific: name every class, method, field, and file. Output ONLY the mar
   return { filePath, fileName, taskContent };
 }
 
-// ── Task generation — CREATE_PROJECT ──────────────────────────────────
-//
-// Genera il file in tasks/create-project-<slug>.md
-// Il prefisso "create-project-" attiva automaticamente la regola sealed
-// 05-create-project.md (glob: tasks/create-project*.md)
+// ── Task generation — CREATE_PROJECT (con streaming live) ──────────────
 
-async function generateCreateProjectTaskFile(apiBase, apiKey, model, userMessage, cwd) {
+async function generateCreateProjectTaskFileStreamed(apiBase, apiKey, model, userMessage, cwd) {
   const createProjectSystemPrompt = `You are an expert Spring Boot architect.
 The user wants to create a NEW Spring Boot project from scratch.
 Generate a detailed task.md file that will be picked up by the "create-project" sealed rule.
@@ -178,18 +219,16 @@ If not mentioned, default to: web + validation + actuator + jpa + h2>
 
 Output ONLY the markdown content, no explanations. Keep it specific and actionable.`;
 
-  const taskContent = await callAPI(apiBase, apiKey, model, [
+  const taskContent = await streamAPIvisible(apiBase, apiKey, model, [
     { role: "system", content: createProjectSystemPrompt },
     { role: "user",   content: `Richiesta utente: ${userMessage}` },
   ]);
 
-  // Estrai artifactId dal contenuto generato, oppure derivalo dal messaggio
   const artifactMatch = taskContent.match(/artifactId:\s*([a-z0-9-]+)/i);
   const artifactSlug  = artifactMatch
     ? artifactMatch[1].toLowerCase()
     : userMessage.toLowerCase().replace(/[^a-z0-9\s]/g, "").trim().split(/\s+/).slice(-3).join("-");
 
-  // Nome file: prefisso create-project- obbligatorio per attivare la regola sealed
   const fileName = `create-project-${artifactSlug}.md`;
   const tasksDir = join(cwd, "tasks");
   mkdirSync(tasksDir, { recursive: true });
@@ -259,37 +298,36 @@ export async function chat(opts) {
 
     rl.pause();
 
-    // ── 1. Intent detection (silenziosa) ──────────────────────────────
-    process.stdout.write(chalk.dim("  ⋯ Analizzo la richiesta..."));
+    // ── 1. Intent detection con spinner ──────────────────────────────
+    const spin = spinner("Analizzo la richiesta...");
     const intent = await detectIntent(apiBase, apiKey, model, input);
-    process.stdout.write("\r" + " ".repeat(40) + "\r");
 
     // ══════════════════════════════════════════════════════════════════
     // INTENT: CREATE_PROJECT
-    // Genera tasks/create-project-<slug>.md e attiva la regola sealed
     // ══════════════════════════════════════════════════════════════════
     if (intent === "CREATE_PROJECT") {
-      console.log(chalk.magenta(`  🏗  Nuovo progetto Spring Boot rilevato. Genero il task...\n`));
+      spin.stop(`  ${chalk.magenta("🏗  Nuovo progetto Spring Boot")}  ${chalk.dim("Genero il task in streaming...")}\n`);
+
+      // Box header
+      console.log(chalk.dim("  ┌" + "─".repeat(58) + "┐"));
+      console.log(chalk.dim("  │") + chalk.bold.magenta("  task.md — create-project") + chalk.dim(" ".repeat(29) + "│"));
+      console.log(chalk.dim("  ├" + "─".repeat(58) + "┤"));
+      process.stdout.write(chalk.dim("  │  "));
 
       let taskData;
       try {
-        taskData = await generateCreateProjectTaskFile(apiBase, apiKey, model, input, cwd);
+        taskData = await generateCreateProjectTaskFileStreamed(apiBase, apiKey, model, input, cwd);
       } catch (err) {
-        console.log(chalk.red(`  Errore nella generazione del task: ${err.message}\n`));
+        console.log(chalk.red(`\n  Errore nella generazione del task: ${err.message}\n`));
         rl.resume();
         rl.prompt();
         return;
       }
 
-      const { filePath, fileName, taskContent } = taskData;
+      const { filePath, fileName } = taskData;
+      console.log(chalk.dim("  └" + "─".repeat(58) + "┘"));
+      console.log(chalk.green(`\n  ✔ tasks/${fileName}`) + chalk.dim("  [05-create-project • sealed]\n"));
 
-      // Anteprima
-      console.log(chalk.bold(`  📄 tasks/${fileName}`) + chalk.dim("  [regola: 05-create-project • sealed]\n"));
-      const preview = taskContent.split("\n").slice(0, 14).map(l => chalk.dim(`  ${l}`)).join("\n");
-      console.log(preview);
-      console.log(chalk.dim("  ...\n"));
-
-      // Conferma
       const answer = await askConfirm(rl,
         chalk.yellow(`  Genero il progetto adesso? `) + chalk.dim("[s/n] "));
 
@@ -309,27 +347,28 @@ export async function chat(opts) {
 
     // ══════════════════════════════════════════════════════════════════
     // INTENT: IMPLEMENT
-    // Genera un task generico e lo esegue
     // ══════════════════════════════════════════════════════════════════
     } else if (intent === "IMPLEMENT") {
-      console.log(chalk.cyan(`  📝 Richiesta di implementazione rilevata. Genero il task...\n`));
+      spin.stop(`  ${chalk.cyan("📝  Implementazione rilevata")}  ${chalk.dim("Genero il task in streaming...")}\n`);
+
+      console.log(chalk.dim("  ┌" + "─".repeat(58) + "┐"));
+      console.log(chalk.dim("  │") + chalk.bold.cyan("  task.md — implement") + chalk.dim(" ".repeat(35) + "│"));
+      console.log(chalk.dim("  ├" + "─".repeat(58) + "┤"));
+      process.stdout.write(chalk.dim("  │  "));
 
       let taskData;
       try {
-        taskData = await generateTaskFile(apiBase, apiKey, model, input, rulesCtx, cwd);
+        taskData = await generateTaskFileStreamed(apiBase, apiKey, model, input, rulesCtx, cwd);
       } catch (err) {
-        console.log(chalk.red(`  Errore nella generazione del task: ${err.message}\n`));
+        console.log(chalk.red(`\n  Errore nella generazione del task: ${err.message}\n`));
         rl.resume();
         rl.prompt();
         return;
       }
 
-      const { filePath, fileName, taskContent } = taskData;
-
-      console.log(chalk.bold(`  📄 Task generato: tasks/${fileName}\n`));
-      const preview = taskContent.split("\n").slice(0, 12).map(l => chalk.dim(`  ${l}`)).join("\n");
-      console.log(preview);
-      console.log(chalk.dim("  ...\n"));
+      const { filePath, fileName } = taskData;
+      console.log(chalk.dim("  └" + "─".repeat(58) + "┘"));
+      console.log(chalk.green(`\n  ✔ tasks/${fileName}\n`));
 
       const answer = await askConfirm(rl,
         chalk.yellow(`  Vuoi eseguire il task adesso? `) + chalk.dim("[s/n] "));
@@ -344,15 +383,15 @@ export async function chat(opts) {
         }
         rl.resume();
       } else {
-        console.log(chalk.dim(`\n  Task salvato in tasks/${fileName}. Puoi eseguirlo manualmente con:\n`));
+        console.log(chalk.dim(`\n  Task salvato. Esegui manualmente con:\n`));
         console.log(chalk.cyan(`  agency task tasks/${fileName}\n`));
       }
 
     // ══════════════════════════════════════════════════════════════════
     // INTENT: CHAT
-    // Risposta normale in streaming
     // ══════════════════════════════════════════════════════════════════
     } else {
+      spin.stop();
       messages.push({ role: "user", content: input });
       try {
         const reply = await streamAPI(apiBase, apiKey, model, messages);
