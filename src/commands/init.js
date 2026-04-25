@@ -1,11 +1,12 @@
-import { existsSync, mkdirSync, writeFileSync, readFileSync, appendFileSync, readdirSync, statSync } from "fs";
-import { join, relative } from "path";
+import { existsSync, mkdirSync, writeFileSync, readFileSync,
+         appendFileSync, readdirSync, statSync, openSync, readSync, closeSync } from "fs";
+import { join } from "path";
 import chalk from "chalk";
 import RULES from "../rules/index.js";
 import BRAND from "../brand.js";
 import { readConfig, syncInternalConfig, isConfigured } from "../agency-config.js";
 
-// Costruisce un albero directory leggero da mandare al modello come contesto
+// Albero directory leggero da mandare al modello come contesto
 function buildDirectoryTree(dir, depth = 0, maxDepth = 3) {
   if (depth > maxDepth) return "";
   const IGNORE = new Set(["node_modules", ".git", ".agency", "dist", "build", "target", ".processed"]);
@@ -25,33 +26,33 @@ function buildDirectoryTree(dir, depth = 0, maxDepth = 3) {
 }
 
 // Legge fino a maxBytes da un file di testo
-function safeRead(path, maxBytes = 2000) {
+function safeRead(filePath, maxBytes = 1500) {
   try {
     const buf = Buffer.alloc(maxBytes);
-    const fd  = (await import("fs")).openSync(path, "r");
-    const n   = (await import("fs")).readSync(fd, buf, 0, maxBytes, 0);
-    (await import("fs")).closeSync(fd);
+    const fd  = openSync(filePath, "r");
+    const n   = readSync(fd, buf, 0, maxBytes, 0);
+    closeSync(fd);
     return buf.slice(0, n).toString("utf8");
   } catch { return ""; }
 }
 
 async function generateOverview(cwd, cfg) {
-  const url    = (cfg?.provider?.url ?? "").replace(/\/+$/, "");
-  const apiKey = cfg?.provider?.api_key ?? "";
-  const model  = process.env.AGENCY_MODEL ?? cfg?.provider?.model ?? "gpt-4o";
+  const url     = (cfg?.provider?.url ?? "").replace(/\/+$/, "");
+  const apiKey  = cfg?.provider?.api_key ?? "";
+  const model   = process.env.AGENCY_MODEL ?? cfg?.provider?.model ?? "gpt-4o";
   const apiBase = url.endsWith("/v1") ? url : url + "/v1";
 
-  // Costruisci contesto minimale del progetto
   const tree = buildDirectoryTree(cwd);
 
-  // Leggi file chiave se esistono
-  const keyFiles = ["package.json", "pom.xml", "build.gradle", "requirements.txt",
-                    "go.mod", "Cargo.toml", "README.md", "docker-compose.yml"];
+  const keyFiles = [
+    "package.json", "pom.xml", "build.gradle", "requirements.txt",
+    "go.mod", "Cargo.toml", "README.md", "docker-compose.yml",
+  ];
   let keyContents = "";
   for (const f of keyFiles) {
     const p = join(cwd, f);
     if (existsSync(p)) {
-      const content = readFileSync(p, "utf8").slice(0, 1500);
+      const content = safeRead(p);
       keyContents += `\n### ${f}\n\`\`\`\n${content}\n\`\`\`\n`;
     }
   }
@@ -116,7 +117,6 @@ export async function init() {
   console.log(chalk.bold(`\n  ${BRAND.displayName}  v${BRAND.version}\n`));
   console.log(chalk.bold("  Inizializzazione progetto...\n"));
 
-  // Crea directory
   mkdirSync(rulesDir, { recursive: true });
   mkdirSync(join(cwd, "tasks", ".processed"), { recursive: true });
   mkdirSync(join(cwd, ".continue", "mcpServers"), { recursive: true });
@@ -124,7 +124,6 @@ export async function init() {
   console.log(chalk.green("  ✓  tasks/.processed/"));
   console.log(chalk.green("  ✓  .continue/mcpServers/"));
 
-  // Scrivi regole
   console.log("\n  Scrittura regole...");
   for (const [filename, rule] of Object.entries(RULES)) {
     const dst = join(rulesDir, filename);
@@ -136,9 +135,7 @@ export async function init() {
     }
   }
 
-  // Genera project overview con l'API configurata
   console.log(chalk.cyan("\n  Generazione project overview..."));
-
   syncInternalConfig();
 
   if (!isConfigured()) {
@@ -157,7 +154,6 @@ export async function init() {
     }
   }
 
-  // Aggiorna .gitignore
   const gi = join(cwd, ".gitignore");
   const existing = existsSync(gi) ? readFileSync(gi, "utf8") : "";
   if (!existing.includes(BRAND.cliName)) {
