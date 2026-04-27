@@ -22,6 +22,12 @@ const CONFIG_TEMPLATE = `# ${BRAND.displayName} — Configurazione
 #
 # Dopo aver impostato url e api_key, esegui:
 #   agency models   → per scegliere il modello
+#
+# Proxy (opzionale):
+#   proxy:
+#     http:     http://proxy.azienda.local:8080
+#     https:    http://proxy.azienda.local:8080
+#     no_proxy: localhost,127.0.0.1
 # ─────────────────────────────────────────────────────────
 
 provider:
@@ -53,16 +59,24 @@ export function writeConfig(cfg) {
 }
 
 /**
+ * Ritorna il blocco proxy salvato nel config, o null.
+ * Usato da network.js per applicare HTTP_PROXY / HTTPS_PROXY.
+ */
+export function readProxy() {
+  const cfg = readConfig();
+  const p   = cfg?.provider?.proxy;
+  if (!p || (!p.http && !p.https)) return null;
+  return {
+    http:     p.http     ?? "",
+    https:    p.https    ?? "",
+    no_proxy: p.no_proxy ?? "",
+  };
+}
+
+/**
  * Legge ~/.continue/config.yaml (formato Continue) e ne estrae
  * il primo modello configurato. Ritorna null se il file non esiste
  * o non è leggibile.
- *
- * Formati supportati:
- *   models:
- *     - provider: openai
- *       apiBase: https://api.openai.com/v1
- *       apiKey: sk-...
- *       model: gpt-4o
  */
 export function readContinueConfig() {
   if (!existsSync(CN_CONFIG_PATH)) return null;
@@ -70,13 +84,10 @@ export function readContinueConfig() {
     const raw = yaml.load(readFileSync(CN_CONFIG_PATH, "utf8"));
     if (!raw || typeof raw !== "object") return null;
 
-    // Cerca il primo modello con apiBase/apiKey
-    const models = raw.models ?? raw.tabAutocompleteModel ? [raw.tabAutocompleteModel] : [];
     const allModels = [
       ...(Array.isArray(raw.models) ? raw.models : []),
       ...(raw.tabAutocompleteModel ? [raw.tabAutocompleteModel] : []),
     ];
-
     const first = allModels.find(m => m?.apiBase || m?.apiKey || m?.model);
     if (!first) return null;
 
@@ -105,10 +116,7 @@ export function hasModel() {
 
 /**
  * Sincronizza ~/.continue/config.yaml con il config di agency.
- * Se il file Continue esiste già lo PRESERVA senza sovrascrivere,
- * perché l'utente potrebbe averlo configurato manualmente con
- * Continue IDE. La sincronizzazione avviene solo in una direzione:
- * agency → Continue, e solo se il file non esiste ancora.
+ * Se il file esiste già, lo preserva senza sovrascrivere.
  */
 export function syncInternalConfig() {
   const cfg   = readConfig();
@@ -116,8 +124,6 @@ export function syncInternalConfig() {
   const key   = cfg?.provider?.api_key ?? "";
   const model = cfg?.provider?.model ?? "gpt-4o";
 
-  // Se ~/.continue/config.yaml esiste già, non tocchiamo nulla.
-  // Continue IDE ha la precedenza sulla propria configurazione.
   if (existsSync(CN_CONFIG_PATH)) return;
 
   mkdirSync(CN_CONFIG_DIR, { recursive: true });
@@ -130,21 +136,11 @@ export function syncInternalConfig() {
   const internalConfig = {
     name: BRAND.displayName,
     version: "1",
-    models: [
-      {
-        name:     "agency-model",
-        provider: "openai",
-        apiBase,
-        apiKey:   key,
-        model,
-      },
-    ],
+    models: [{
+      name: "agency-model", provider: "openai", apiBase, apiKey: key, model,
+    }],
     tabAutocompleteModel: {
-      name:     "agency-autocomplete",
-      provider: "openai",
-      apiBase,
-      apiKey:   key,
-      model,
+      name: "agency-autocomplete", provider: "openai", apiBase, apiKey: key, model,
     },
   };
 
