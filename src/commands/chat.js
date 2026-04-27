@@ -8,12 +8,9 @@ import { task } from "./task.js";
 import BRAND from "../brand.js";
 
 // ── Spinner ──────────────────────────────────────────────────────────────
-//
-// Restituisce uno stop() da chiamare al termine.
-// Mostra un cursore animato + messaggio sulla stessa riga.
 
 function spinner(label) {
-  const frames = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"];
+  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let i = 0;
   const id = setInterval(() => {
     process.stdout.write(`\r  ${chalk.cyan(frames[i++ % frames.length])} ${chalk.dim(label)}`);
@@ -28,26 +25,77 @@ function spinner(label) {
   };
 }
 
+// ── Network error helper ─────────────────────────────────────────────────
+
+/**
+ * Stampa un errore di rete/API dettagliato.
+ * Distingue errori di connessione (ECONNREFUSED, ETIMEDOUT…) da
+ * errori HTTP (4xx, 5xx) e fornisce suggerimenti specifici.
+ */
+function printNetworkError(err, context = "") {
+  const msg = err.message ?? String(err);
+  console.log("");
+  console.log(chalk.red(`  ✖ Errore${context ? ` (${context})` : ""}: ${msg}`));
+
+  if (/ECONNREFUSED/i.test(msg)) {
+    console.log(chalk.yellow(`    • Il provider non è raggiungibile. Verifica che il server sia avviato.`));
+  } else if (/ENOTFOUND/i.test(msg)) {
+    console.log(chalk.yellow(`    • Hostname non trovato. Controlla l'URL nel config.`));
+    console.log(chalk.dim(`      agency models → per riconfigurare`));
+  } else if (/ETIMEDOUT|timeout/i.test(msg)) {
+    console.log(chalk.yellow(`    • Timeout. Il server impiega troppo o non è raggiungibile.`));
+  } else if (/401|Unauthorized/i.test(msg)) {
+    console.log(chalk.yellow(`    • API Key non valida o scaduta.`));
+    console.log(chalk.dim(`      Riesegui: agency models`));
+  } else if (/403/i.test(msg)) {
+    console.log(chalk.yellow(`    • Accesso negato (403). Controlla i permessi della API key.`));
+  } else if (/404/i.test(msg)) {
+    console.log(chalk.yellow(`    • Endpoint non trovato (404). L'URL potrebbe mancare di /v1`));
+  } else if (/429/i.test(msg)) {
+    console.log(chalk.yellow(`    • Rate limit raggiunto. Riprova tra qualche secondo.`));
+  } else if (/5[0-9]{2}/i.test(msg)) {
+    console.log(chalk.yellow(`    • Errore lato server. Il provider potrebbe essere temporaneamente non disponibile.`));
+  }
+  console.log("");
+}
+
 // ── API helpers ─────────────────────────────────────────────────────────
 
 async function callAPI(apiBase, apiKey, model, messages) {
-  const res = await fetch(`${apiBase}/chat/completions`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-    body:    JSON.stringify({ model, messages, stream: false }),
-  });
-  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+  let res;
+  try {
+    res = await fetch(`${apiBase}/chat/completions`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+      body:    JSON.stringify({ model, messages, stream: false }),
+      signal:  AbortSignal.timeout(30000),
+    });
+  } catch (err) {
+    throw new Error(`Connessione a ${apiBase} fallita: ${err.message}`);
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`API ${res.status} ${res.statusText}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
   return (await res.json()).choices?.[0]?.message?.content ?? "";
 }
 
-// Streaming visibile a schermo — ritorna il testo completo
 async function streamAPIvisible(apiBase, apiKey, model, messages, prefix = "  ") {
-  const res = await fetch(`${apiBase}/chat/completions`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-    body:    JSON.stringify({ model, messages, stream: true }),
-  });
-  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+  let res;
+  try {
+    res = await fetch(`${apiBase}/chat/completions`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+      body:    JSON.stringify({ model, messages, stream: true }),
+      signal:  AbortSignal.timeout(120000),
+    });
+  } catch (err) {
+    throw new Error(`Connessione a ${apiBase} fallita: ${err.message}`);
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`API ${res.status} ${res.statusText}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
   const reader  = res.body.getReader();
   const decoder = new TextDecoder();
   let full = "";
@@ -72,14 +120,22 @@ async function streamAPIvisible(apiBase, apiKey, model, messages, prefix = "  ")
   return full;
 }
 
-// Streaming normale per la chat (testo colorato, non dim)
 async function streamAPI(apiBase, apiKey, model, messages) {
-  const res = await fetch(`${apiBase}/chat/completions`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-    body:    JSON.stringify({ model, messages, stream: true }),
-  });
-  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+  let res;
+  try {
+    res = await fetch(`${apiBase}/chat/completions`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+      body:    JSON.stringify({ model, messages, stream: true }),
+      signal:  AbortSignal.timeout(120000),
+    });
+  } catch (err) {
+    throw new Error(`Connessione a ${apiBase} fallita: ${err.message}`);
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`API ${res.status} ${res.statusText}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
   const reader  = res.body.getReader();
   const decoder = new TextDecoder();
   let full = "";
@@ -131,7 +187,10 @@ async function detectIntent(apiBase, apiKey, model, userMessage) {
     if (upper.includes("CREATE_PROJECT")) return "CREATE_PROJECT";
     if (upper.includes("IMPLEMENT"))      return "IMPLEMENT";
     return "CHAT";
-  } catch {
+  } catch (err) {
+    // In caso di errore nella intent detection, mostra il dettaglio
+    // e falla cadere in CHAT per non bloccare l'utente
+    printNetworkError(err, "intent detection");
     return "CHAT";
   }
 }
@@ -150,7 +209,7 @@ function loadRulesContext(cwd) {
   return ctx;
 }
 
-// ── Task generation — IMPLEMENT (con streaming live) ───────────────────
+// ── Task generation — IMPLEMENT ────────────────────────────────────────
 
 async function generateTaskFileStreamed(apiBase, apiKey, model, userMessage, rulesCtx, cwd) {
   const taskSystemPrompt = `You are an expert software architect. Given a feature request and project guidelines, generate a detailed task.md file.
@@ -187,7 +246,7 @@ Be very specific: name every class, method, field, and file. Output ONLY the mar
   return { filePath, fileName, taskContent };
 }
 
-// ── Task generation — CREATE_PROJECT (con streaming live) ──────────────
+// ── Task generation — CREATE_PROJECT ──────────────────────────────────
 
 async function generateCreateProjectTaskFileStreamed(apiBase, apiKey, model, userMessage, cwd) {
   const createProjectSystemPrompt = `You are an expert Spring Boot architect.
@@ -241,9 +300,7 @@ Output ONLY the markdown content, no explanations. Keep it specific and actionab
 
 function askConfirm(rl, question) {
   return new Promise(resolve => {
-    rl.question(question, answer => {
-      resolve(answer.trim().toLowerCase());
-    });
+    rl.question(question, answer => resolve(answer.trim().toLowerCase()));
   });
 }
 
@@ -298,7 +355,6 @@ export async function chat(opts) {
 
     rl.pause();
 
-    // ── 1. Intent detection con spinner ──────────────────────────────
     const spin = spinner("Analizzo la richiesta...");
     const intent = await detectIntent(apiBase, apiKey, model, input);
 
@@ -308,7 +364,6 @@ export async function chat(opts) {
     if (intent === "CREATE_PROJECT") {
       spin.stop(`  ${chalk.magenta("🏗  Nuovo progetto Spring Boot")}  ${chalk.dim("Genero il task in streaming...")}\n`);
 
-      // Box header
       console.log(chalk.dim("  ┌" + "─".repeat(58) + "┐"));
       console.log(chalk.dim("  │") + chalk.bold.magenta("  task.md — create-project") + chalk.dim(" ".repeat(29) + "│"));
       console.log(chalk.dim("  ├" + "─".repeat(58) + "┤"));
@@ -318,7 +373,7 @@ export async function chat(opts) {
       try {
         taskData = await generateCreateProjectTaskFileStreamed(apiBase, apiKey, model, input, cwd);
       } catch (err) {
-        console.log(chalk.red(`\n  Errore nella generazione del task: ${err.message}\n`));
+        printNetworkError(err, "generazione task create-project");
         rl.resume();
         rl.prompt();
         return;
@@ -337,7 +392,7 @@ export async function chat(opts) {
         try {
           await task(filePath, { auto: true });
         } catch (err) {
-          console.log(chalk.red(`  Errore nell'esecuzione del task: ${err.message}\n`));
+          printNetworkError(err, "esecuzione task");
         }
         rl.resume();
       } else {
@@ -360,7 +415,7 @@ export async function chat(opts) {
       try {
         taskData = await generateTaskFileStreamed(apiBase, apiKey, model, input, rulesCtx, cwd);
       } catch (err) {
-        console.log(chalk.red(`\n  Errore nella generazione del task: ${err.message}\n`));
+        printNetworkError(err, "generazione task implement");
         rl.resume();
         rl.prompt();
         return;
@@ -373,13 +428,13 @@ export async function chat(opts) {
       const answer = await askConfirm(rl,
         chalk.yellow(`  Vuoi eseguire il task adesso? `) + chalk.dim("[s/n] "));
 
-      if (["s", "si", "y", "yes"].includes(answer)) {
+      if (["s", "si", "y", "yes", ""].includes(answer) && answer !== "") {
         console.log("");
         rl.pause();
         try {
           await task(filePath, { auto: true });
         } catch (err) {
-          console.log(chalk.red(`  Errore nell'esecuzione del task: ${err.message}\n`));
+          printNetworkError(err, "esecuzione task");
         }
         rl.resume();
       } else {
@@ -397,7 +452,7 @@ export async function chat(opts) {
         const reply = await streamAPI(apiBase, apiKey, model, messages);
         messages.push({ role: "assistant", content: reply });
       } catch (err) {
-        console.log(chalk.red(`\n  Errore: ${err.message}\n`));
+        printNetworkError(err, "risposta chat");
         messages.pop();
       }
     }
