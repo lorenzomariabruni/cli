@@ -1,4 +1,4 @@
-import { createInterface } from "readline";
+import { createInterface, emitKeypressEvents } from "readline";
 import chalk from "chalk";
 import {
   readProxy, saveProxySetup,
@@ -18,7 +18,7 @@ function selectWithArrows(title, choices) {
   return new Promise((resolve) => {
     let selected = 0;
 
-    require("readline").emitKeypressEvents(process.stdin);
+    emitKeypressEvents(process.stdin);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
     const render = () => {
