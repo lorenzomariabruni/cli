@@ -20,6 +20,7 @@ import { review }        from "./commands/review.js";
 import { task }          from "./commands/task.js";
 import { models }        from "./commands/models.js";
 import { setup }         from "./commands/setup.js";
+import { proxy }         from "./commands/proxy.js";
 import { mcpAdd }        from "./commands/mcp-add.js";
 import { mcpList }       from "./commands/mcp-list.js";
 import { mcpQuery }      from "./commands/mcp-query.js";
@@ -36,12 +37,12 @@ console.log(
 await checkDependencies();
 
 // ── Comandi che non richiedono configurazione (bypass totale) ─────────────────
-const BYPASS_CMDS = new Set(["models", "setup", "--version", "-V", "--help", "-h"]);
+const BYPASS_CMDS = new Set(["models", "setup", "proxy", "--version", "-V", "--help", "-h"]);
 const firstArg = process.argv[2] ?? "";
 
 // ── First-run proxy wizard ────────────────────────────────────────────────────
 // Eseguito UNA SOLA VOLTA alla prima invocazione, prima di qualsiasi comando.
-// Non viene eseguito se il comando è models/setup/help (BYPASS_CMDS).
+// Non viene eseguito se il comando è models/setup/proxy/help (BYPASS_CMDS).
 if (!BYPASS_CMDS.has(firstArg) && !isProxyConfigured()) {
   await runProxyWizard();
 }
@@ -100,7 +101,7 @@ async function runProxyWizard() {
   if (!["s", "si", "y", "yes"].includes(useProxy.toLowerCase())) {
     rl.close();
     saveProxySetup(null); // segna come già configurato (skip)
-    console.log(chalk.dim("\n  Proxy non configurato. Puoi impostarlo in seguito con: agency models\n"));
+    console.log(chalk.dim("\n  Proxy non configurato. Puoi modificarlo in seguito con: agency proxy\n"));
     console.log(chalk.dim("  ─────────────────────────────────────────────────────────────────────\n"));
     return;
   }
@@ -124,7 +125,7 @@ async function runProxyWizard() {
   if (http)     console.log(chalk.dim(`    HTTP_PROXY  → ${http}`));
   if (https)    console.log(chalk.dim(`    HTTPS_PROXY → ${https}`));
   if (no_proxy) console.log(chalk.dim(`    NO_PROXY    → ${no_proxy}`));
-  console.log(chalk.dim("\n  Puoi modificarlo in seguito con: agency models"));
+  console.log(chalk.dim("\n  Puoi modificarlo in seguito con: agency proxy"));
   console.log(chalk.dim("  ─────────────────────────────────────────────────────────────────────\n"));
 }
 
@@ -182,6 +183,11 @@ program
   .command("setup")
   .description("Configura il provider AI (procedura guidata)")
   .action(setup);
+
+program
+  .command("proxy")
+  .description("Mostra, modifica o elimina la configurazione proxy HTTP/HTTPS")
+  .action(proxy);
 
 program
   .command("mcp:add <server>")

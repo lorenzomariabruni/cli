@@ -23,7 +23,7 @@ const CONFIG_TEMPLATE = `# ${BRAND.displayName} — Configurazione
 # Dopo aver impostato url e api_key, esegui:
 #   agency models   → per scegliere il modello
 #
-# Proxy (opzionale — configurabile anche con: agency models):
+# Proxy (opzionale — configurabile anche con: agency proxy):
 #   proxy:
 #     configured: true
 #     http:       http://proxy.azienda.local:8080
@@ -145,6 +145,8 @@ export function hasModel() {
 
 /**
  * Sincronizza ~/.continue/config.yaml con il config di agency.
+ * Aggiunge verifySsl: false a tutti i modelli per evitare errori SSL
+ * in ambienti con proxy o certificati self-signed aziendali.
  * Se il file esiste già, lo preserva senza sovrascrivere.
  */
 export function syncInternalConfig() {
@@ -162,15 +164,29 @@ export function syncInternalConfig() {
   if (base.endsWith("/v1")) base = base.slice(0, -3);
   const apiBase = base + "/v1";
 
+  const modelEntry = {
+    name: "agency-model",
+    provider: "openai",
+    apiBase,
+    apiKey: key,
+    model,
+    verifySsl: false,
+  };
+
+  const autocompleteEntry = {
+    name: "agency-autocomplete",
+    provider: "openai",
+    apiBase,
+    apiKey: key,
+    model,
+    verifySsl: false,
+  };
+
   const internalConfig = {
     name: BRAND.displayName,
     version: "1",
-    models: [{
-      name: "agency-model", provider: "openai", apiBase, apiKey: key, model,
-    }],
-    tabAutocompleteModel: {
-      name: "agency-autocomplete", provider: "openai", apiBase, apiKey: key, model,
-    },
+    models: [modelEntry],
+    tabAutocompleteModel: autocompleteEntry,
   };
 
   writeFileSync(CN_CONFIG_PATH, yaml.dump(internalConfig, { indent: 2 }), "utf8");
