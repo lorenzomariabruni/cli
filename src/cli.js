@@ -10,16 +10,17 @@ import {
   syncInternalConfig, CONFIG_PATH
 } from "./agency-config.js";
 
-import { chat }     from "./commands/chat.js";
-import { run }      from "./commands/run.js";
-import { init }     from "./commands/init.js";
-import { review }   from "./commands/review.js";
-import { task }     from "./commands/task.js";
-import { models }   from "./commands/models.js";
-import { setup }    from "./commands/setup.js";
-import { mcpAdd }   from "./commands/mcp-add.js";
-import { mcpList }  from "./commands/mcp-list.js";
-import { mcpQuery } from "./commands/mcp-query.js";
+import { chat }          from "./commands/chat.js";
+import { run }           from "./commands/run.js";
+import { init }          from "./commands/init.js";
+import { review }        from "./commands/review.js";
+import { task }          from "./commands/task.js";
+import { models }        from "./commands/models.js";
+import { setup }         from "./commands/setup.js";
+import { mcpAdd }        from "./commands/mcp-add.js";
+import { mcpList }       from "./commands/mcp-list.js";
+import { mcpQuery }      from "./commands/mcp-query.js";
+import { rulesList, rulesNew, rulesFromFile } from "./commands/rules.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, "../package.json"), "utf8"));
@@ -45,7 +46,7 @@ if (!BYPASS_CMDS.has(firstArg) && !isConfigured()) {
 
 if (!BYPASS_CMDS.has(firstArg) && isConfigured()) {
   if (!hasModel()) {
-    console.log(chalk.yellow(`  \u26a0  Nessun modello selezionato. Esegui: ${BRAND.cliName} models\n`));
+    console.log(chalk.yellow(`  ⚠  Nessun modello selezionato. Esegui: ${BRAND.cliName} models\n`));
   }
   syncInternalConfig();
   enforceRules();
@@ -122,5 +123,30 @@ program
   .option("--role <role>",       "Ruolo: pm | ticket-manager")
   .option("-o, --output <file>", "Salva output su file")
   .action(mcpQuery);
+
+// ── Rules commands ──────────────────────────────────────────────────────
+const rules = program
+  .command("rules")
+  .description("Gestisce le regole del progetto (.continue/rules/)");
+
+rules
+  .command("list")
+  .description("Lista le regole attive")
+  .action(rulesList);
+
+rules
+  .command("new")
+  .description("Crea una nuova regola (wizard)")
+  .action(rulesNew);
+
+rules
+  .command("from-file <file>")
+  .description("Genera una regola da un file PDF o DOCX")
+  .option("--name <name>",          "Nome custom per la regola")
+  .option("--always",               "Forza alwaysApply: true")
+  .action((file, opts) => rulesFromFile(file, {
+    name:        opts.name,
+    alwaysApply: opts.always ? true : undefined,
+  }));
 
 program.parse();
