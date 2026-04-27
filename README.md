@@ -20,6 +20,7 @@
 - [Regole del progetto](#regole-del-progetto)
 - [Code Review](#code-review)
 - [Configurazione provider](#configurazione-provider)
+- [Configurazione proxy](#configurazione-proxy)
 - [Struttura del progetto](#struttura-del-progetto)
 - [Personalizzazione CLI](#personalizzazione-cli)
 
@@ -48,6 +49,7 @@ agency-cli/
 │   ├── brand.js            ← Nome CLI, versione, colore primario
 │   ├── agency-config.js    ← Lettura/scrittura ~/.agency/config.yaml
 │   ├── config.js           ← Helper configurazione
+│   ├── network.js          ← Proxy helper: applyProxyFromConfig + buildContinueEnv
 │   ├── roles.js            ← Definizione ruoli (developer, pm, ticket-manager)
 │   ├── utils.js            ← Spinner, clearLine, helper terminale
 │   ├── commands/
@@ -57,7 +59,7 @@ agency-cli/
 │   │   ├── init.js         ← agency init: analisi progetto + seed regole
 │   │   ├── models.js       ← agency models: configurazione provider interattiva
 │   │   ├── run.js          ← agency run: prompt one-shot
-│   │   └── rules.js        ← agency rules new/list
+│   │   └── rules.js        ← agency rules new/list/from-file
 │   └── rules/
 │       ├── 01-java-guidelines.md     ← sealed
 │       ├── 02-angular-guidelines.md  ← sealed
@@ -111,6 +113,7 @@ agency chat
 | `agency review` | Code review della diff git corrente |
 | `agency rules new` | Crea una nuova regola guidata per il progetto |
 | `agency rules list` | Elenca le regole attive nel progetto |
+| `agency rules from-file <file>` | Genera una regola da un PDF o DOCX |
 | `agency run <prompt>` | Prompt one-shot non interattivo |
 | `agency mcp:add <server>` | Aggiunge un server MCP (jira, github, postgres...) |
 | `agency mcp:list` | Lista server MCP configurati |
@@ -425,7 +428,7 @@ Le regole si trovano in `.continue/rules/` e vengono caricate automaticamente. O
 
 > Le regole **sealed** vengono riscritte ad ogni `agency init` e non possono essere modificate permanentemente.
 
-### Creare una nuova regola
+### Creare una nuova regola (wizard)
 
 ```bash
 agency rules new
@@ -449,22 +452,42 @@ Wizard interattivo:
   ✓ Regola creata: .continue/rules/06-angular-feature-rules.md
 ```
 
-In alternativa, crea il file manualmente:
+### Creare una regola da PDF o DOCX
 
 ```bash
-cat > .continue/rules/06-my-rule.md << 'EOF'
----
-name: My Rule
-globs: ["src/**/*.ts"]
-alwaysApply: false
-description: Descrizione della regola
----
+agency rules from-file <file> [--name <nome>] [--always]
+```
 
-# My Rule
+La CLI estrae il testo dal file (tramite `pdf-parse` per PDF e `mammoth` per DOCX), lo invia all'LLM con un prompt dedicato e genera automaticamente un file `.continue/rules/NN-<slug>.md` con frontmatter valido per Continue.
 
-- Regola 1
-- Regola 2
-EOF
+```bash
+# Da un PDF con linee guida architetturali
+agency rules from-file ./docs/coding-standards.pdf
+
+# Da un DOCX con nome custom, sempre attiva
+agency rules from-file ./architettura.docx --name "Architettura Microservizi" --always
+```
+
+Output tipico:
+
+```
+  ⊗ Estrazione testo da coding-standards.pdf... ✔
+  Testo estratto: 8.432 caratteri
+
+  ⊗ Analisi con LLM... ✔
+
+  ✓ Regola creata: .continue/rules/05-coding-standards.md
+  Sorgente:   coding-standards.pdf
+  Caratteri estratti: 8.432
+  Caratteri regola:   2.187
+
+  Anteprima:
+  ---
+  name: Coding Standards
+  description: Standard di codice aziendali estratti dal documento
+  alwaysApply: true
+  ---
+  ...
 ```
 
 ### Elencare le regole attive
@@ -540,6 +563,71 @@ provider:
 | LM Studio (locale) | `http://localhost:1234/v1` |
 | Groq | `https://api.groq.com/openai/v1` |
 | Azure OpenAI | `https://<resource>.openai.azure.com/openai/deployments/<model>` |
+
+---
+
+## Configurazione proxy
+
+In reti aziendali o ambienti con proxy autenticato, Continue CLI può andare in timeout se `HTTP_PROXY` e `HTTPS_PROXY` non sono impostati. Agency gestisce questo automaticamente.
+
+### Wizard al primo avvio
+
+Alla **prima esecuzione** di qualsiasi comando Agency (esclusi `models`, `setup`, `--help`), viene mostrato un wizard una tantum che chiede se configurare un proxy:
+
+```
+  ─────────────────────────────────────────────────────────────────────
+  Configurazione proxy (prima esecuzione)
+
+  Continue CLI potrebbe andare in timeout in reti aziendali senza proxy.
+  Questa configurazione verrà salvata e non verrà più chiesta.
+
+  Vuoi configurare un proxy HTTP/HTTPS per Continue? [s/N]: s
+  HTTP_PROXY  (es: http://proxy.azienda.local:8080): http://proxy.corp:3128
+  HTTPS_PROXY (es: http://proxy.azienda.local:8080): [http://proxy.corp:3128]
+  NO_PROXY    (host esclusi dal proxy): [localhost,127.0.0.1]
+
+  ✓ Proxy salvato nel config
+    HTTP_PROXY  → http://proxy.corp:3128
+    HTTPS_PROXY → http://proxy.corp:3128
+    NO_PROXY    → localhost,127.0.0.1
+
+  Puoi modificarlo in seguito con: agency models
+  ─────────────────────────────────────────────────────────────────────
+```
+
+Se si risponde **N**, il wizard non viene più mostrato e il proxy non viene configurato. È possibile configurarlo in seguito tramite `agency models`.
+
+### Come viene propagato
+
+Il proxy salvato viene applicato a **due livelli**:
+
+| Livello | Meccanismo | Cosa copre |
+|---|---|---|
+| **fetch() interne** | `EnvHttpProxyAgent` (undici) + `process.env` | Chiamate API al provider LLM da Agency |
+| **Processi figli** | `buildContinueEnv()` in `network.js` | Continue CLI e tool lanciati via `execa()` |
+
+Nei comandi che lanciano processi figli (es. `agency task`, `agency run`), l'env passato a `execa()` include sempre `HTTP_PROXY`, `HTTPS_PROXY` e `NO_PROXY` se configurati, evitando timeout di Continue.
+
+### Configurazione manuale
+
+Il proxy è salvato in `~/.agency/config.yaml`:
+
+```yaml
+provider:
+  url: "https://openrouter.ai/api/v1"
+  api_key: "sk-or-..."
+  model: "gpt-4o"
+
+proxy:
+  configured: true
+  http: "http://proxy.azienda.local:8080"
+  https: "http://proxy.azienda.local:8080"
+  no_proxy: "localhost,127.0.0.1"
+```
+
+Per **disabilitare** il proxy, imposta i campi `http` e `https` come stringa vuota lasciando `configured: true`.
+
+Per **ri-eseguire** il wizard, rimuovi l'intera chiave `proxy` dal file di config.
 
 ---
 

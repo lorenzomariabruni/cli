@@ -23,11 +23,12 @@ const CONFIG_TEMPLATE = `# ${BRAND.displayName} — Configurazione
 # Dopo aver impostato url e api_key, esegui:
 #   agency models   → per scegliere il modello
 #
-# Proxy (opzionale):
+# Proxy (opzionale — configurabile anche con: agency models):
 #   proxy:
-#     http:     http://proxy.azienda.local:8080
-#     https:    http://proxy.azienda.local:8080
-#     no_proxy: localhost,127.0.0.1
+#     configured: true
+#     http:       http://proxy.azienda.local:8080
+#     https:      http://proxy.azienda.local:8080
+#     no_proxy:   localhost,127.0.0.1
 # ─────────────────────────────────────────────────────────
 
 provider:
@@ -59,13 +60,41 @@ export function writeConfig(cfg) {
 }
 
 /**
+ * Ritorna true se il wizard proxy è già stato eseguito almeno una volta
+ * (indipendentemente dal fatto che un proxy sia stato configurato o meno).
+ */
+export function isProxyConfigured() {
+  const cfg = readConfig();
+  return cfg?.proxy?.configured === true;
+}
+
+/**
+ * Salva il risultato del wizard proxy nel config.
+ * Viene chiamato sia che l'utente abbia inserito un proxy, sia che abbia
+ * risposto "no": in entrambi i casi marca configured:true per non rieseguire.
+ *
+ * @param {{ http?: string, https?: string, no_proxy?: string } | null} proxy
+ *   null = utente ha saltato la configurazione proxy
+ */
+export function saveProxySetup(proxy) {
+  const cfg = readConfig();
+  cfg.proxy = {
+    configured: true,
+    http:       proxy?.http     ?? "",
+    https:      proxy?.https    ?? "",
+    no_proxy:   proxy?.no_proxy ?? "",
+  };
+  writeConfig(cfg);
+}
+
+/**
  * Ritorna il blocco proxy salvato nel config, o null.
  * Usato da network.js per applicare HTTP_PROXY / HTTPS_PROXY.
  */
 export function readProxy() {
   const cfg = readConfig();
-  const p   = cfg?.provider?.proxy;
-  if (!p || (!p.http && !p.https)) return null;
+  const p   = cfg?.proxy;
+  if (!p?.configured || (!p.http && !p.https)) return null;
   return {
     http:     p.http     ?? "",
     https:    p.https    ?? "",
