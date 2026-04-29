@@ -1,0 +1,58 @@
+<!--
+  Spring Boot 3 - MCP Server POM additions
+  ==========================================
+  Check https://central.sonatype.com/artifact/org.springframework.ai/spring-ai-bom
+  for the latest Spring AI GA version before using.
+-->
+
+<!-- 1. Add inside <properties> -->
+<properties>
+    <spring-ai.version>1.0.0</spring-ai.version>
+    <!-- bump to latest GA: e.g. 1.0.1, 1.1.0 when available -->
+</properties>
+
+<!-- 2. Add inside <dependencyManagement> <dependencies> -->
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-bom</artifactId>
+            <version>${spring-ai.version}</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<!-- 3. Add inside <dependencies> -->
+<dependencies>
+
+    <!-- MCP Server auto-configuration (Spring AI 1.0 GA artifact name) -->
+    <dependency>
+        <groupId>org.springframework.ai</groupId>
+        <artifactId>spring-ai-starter-mcp-server</artifactId>
+        <!-- version managed by spring-ai-bom -->
+    </dependency>
+
+    <!--
+      OPTIONAL: keep spring-boot-starter-web ONLY if you need SSE (HTTP) transport.
+      For STDIO transport (Claude Desktop, CLI agents): REMOVE this dependency
+      and set spring.main.web-application-type=none in application.yml.
+    -->
+    <!--
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    -->
+
+</dependencies>
+
+<!--
+  NOTES:
+  - Do NOT use the old milestone artifact "spring-ai-mcp-server-spring-boot-starter".
+    The correct GA artifact is "spring-ai-starter-mcp-server".
+  - Spring AI 1.0+ requires Spring Boot 3.x and Java 17+.
+  - For STDIO transport add to application.yml:
+      spring.main.web-application-type: none
+-->

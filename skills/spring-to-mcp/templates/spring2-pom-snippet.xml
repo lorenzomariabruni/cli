@@ -1,0 +1,74 @@
+<!--
+  Spring Boot 2 - MCP Server POM additions
+  ==========================================
+  Uses the raw official MCP Java SDK (io.modelcontextprotocol.sdk).
+  Spring AI is NOT used here - it requires Spring Boot 3.
+
+  PREREQUISITES:
+  - Spring Boot 2.7.x (last 2.x maintenance release)
+  - Java 17+ (the MCP Java SDK 1.1.0 requires Java 17)
+
+  If java.version is currently 8 or 11, update it:
+    <java.version>17</java.version>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+
+  Check https://central.sonatype.com/artifact/io.modelcontextprotocol.sdk/mcp-bom
+  for the latest BOM version.
+-->
+
+<!-- 1. Update <properties> -->
+<properties>
+    <java.version>17</java.version>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+    <mcp-sdk.version>1.1.0</mcp-sdk.version>
+</properties>
+
+<!-- 2. Add inside <dependencyManagement> <dependencies> -->
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>io.modelcontextprotocol.sdk</groupId>
+            <artifactId>mcp-bom</artifactId>
+            <version>${mcp-sdk.version}</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<!-- 3. Add inside <dependencies> -->
+<dependencies>
+
+    <!-- MCP Java SDK (core + Jackson JSON binding) -->
+    <dependency>
+        <groupId>io.modelcontextprotocol.sdk</groupId>
+        <artifactId>mcp</artifactId>
+        <!-- version managed by mcp-bom -->
+    </dependency>
+
+    <!-- Jackson is usually included via spring-boot-starter,
+         but add explicitly if not already present: -->
+    <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <!-- version managed by Spring Boot BOM -->
+    </dependency>
+
+    <!--
+      For STDIO-only MCP: remove the web starter and set
+      spring.main.web-application-type=none in application.properties.
+
+      For SSE on Spring Boot 2, keep the web starter but note:
+      Spring Boot 2 uses javax.servlet (not jakarta.servlet).
+      STDIO is strongly recommended for Spring Boot 2.
+    -->
+    <!--
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    -->
+
+</dependencies>
